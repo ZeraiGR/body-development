@@ -13,17 +13,18 @@ import glob
 import json
 import re
 
-# Постоянные HTTPS-URL схем на catbox.moe (см. scripts/images/schematics.py).
+# Постоянные HTTPS-URL схем на GitHub raw (открывается в РФ, в отличие от catbox).
+RAW = "https://raw.githubusercontent.com/ZeraiGR/body-development/main/assets/images"
 IMG = {
-    "disc_pressure": "https://files.catbox.moe/ah0ywv.png",
-    "disc_structure": "https://files.catbox.moe/yjlc15.png",
-    "breathing_iap": "https://files.catbox.moe/c9lzxw.png",
-    "posture_chain": "https://files.catbox.moe/64wblc.png",
-    "asymmetry": "https://files.catbox.moe/ohhl8f.png",
-    "mfr_trigger": "https://files.catbox.moe/i2rykb.png",
-    "hip_flexors": "https://files.catbox.moe/9w9ahs.png",
-    "glutes_bridge": "https://files.catbox.moe/zhrdzq.png",
-    "microbreak": "https://files.catbox.moe/ilhoww.png",
+    "disc_pressure": f"{RAW}/disc_pressure.png",
+    "disc_structure": f"{RAW}/disc_structure.png",
+    "breathing_iap": f"{RAW}/breathing_iap.png",
+    "posture_chain": f"{RAW}/posture_chain.png",
+    "asymmetry": f"{RAW}/asymmetry.png",
+    "mfr_trigger": f"{RAW}/mfr_trigger.png",
+    "hip_flexors": f"{RAW}/hip_flexors.png",
+    "glutes_bridge": f"{RAW}/glutes_bridge.png",
+    "microbreak": f"{RAW}/microbreak.png",
 }
 
 # (ключевые_слова_темы, url, подпись)
