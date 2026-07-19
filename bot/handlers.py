@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from aiogram import F, Router
 from aiogram.enums import ParseMode
@@ -154,6 +155,62 @@ async def cmd_mute(message: Message) -> None:
 async def cmd_unmute(message: Message) -> None:
     await db.set_channel("tg", muted=False)
     await message.answer("🔔 Рассылки в Telegram снова включены.")
+
+
+# --------------------------------------------------------------------------- #
+# Фото «до/после» + AI-анализ осанки (minicpm-v)
+# --------------------------------------------------------------------------- #
+@router.message(F.photo)
+async def on_photo(message: Message) -> None:
+    """Фото с подписью /before или /after — сохраняем для сравнения осанки."""
+    cap = (message.caption or "").strip().lower()
+    role = None
+    if cap.startswith("/before"):
+        role = "before"
+    elif cap.startswith("/after"):
+        role = "after"
+    if role is None:
+        await message.answer(
+            "📸 Пришли фото с подписью /before или /after — сохраню для анализа осанки. "
+            "Когда будет пара до/после — /analyze сравнит через ИИ."
+        )
+        return
+    today = planner.today_iso(config.schedule.timezone)
+    os.makedirs("data/photos", exist_ok=True)
+    path = f"data/photos/{role}_{today}.jpg"
+    try:
+        await message.bot.download(message.photo[-1], destination=path)
+    except Exception as exc:  # noqa: BLE001
+        await message.answer(f"⚠️ Не удалось сохранить фото: {exc}")
+        return
+    note = message.caption.replace("/before", "").replace("/after", "").strip()
+    await db.add_photo(role, path, note)
+    await message.answer(
+        f"📸 Сохранено: *{role}* ({today}). "
+        + ("Когда будет пара до/после — /analyze сравнит осанку." if role == "before"
+           else "Теперь /analyze — сравнит «до» и «после» через ИИ.")
+    )
+
+
+@router.message(Command("analyze"))
+async def cmd_analyze(message: Message) -> None:
+    """Сравнить последние фото до/после через vision-модель."""
+    before = await db.latest_photo("before")
+    after = await db.latest_photo("after")
+    if not (before and after):
+        await message.answer("Нужны оба фото: пришли /before + фото и /after + фото, потом /analyze.")
+        return
+    await message.answer("🔍 Сравниваю фото до/после через ИИ (minicpm-v)… это ~30 сек.")
+    prompt = (
+        "Сравни две фотографии осанки (первая — «до», вторая — «после») мужчины-разработчика "
+        "с гиперлордозом, кифозом и асимметрией (корпус сдвинут влево, правая сторона гипертонична). "
+        "Кратко (4-7 предложений): что изменилось в осанке/плечах/пояснице/асимметрии, "
+        "что стало лучше, на что обратить внимание. Тёплый, ободряющий тон. На русском."
+    )
+    reply = await llm.vision_analyze(prompt, [before["path"], after["path"]])
+    await message.answer(
+        reply or "🤖 ИИ-анализ сейчас недоступен (minicpm-v не отвечает). Попробуй позже."
+    )
 
 
 @router.message(Command("today"))

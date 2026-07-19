@@ -95,6 +95,15 @@ async def init_db(db_path: str) -> None:
             PRIMARY KEY (date, kind, platform)
         );
 
+        -- Фото «до/после» для AI-анализа осанки.
+        CREATE TABLE IF NOT EXISTS photos (
+            id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts   TEXT NOT NULL,
+            role TEXT NOT NULL,   -- 'before' | 'after'
+            path TEXT NOT NULL,
+            note TEXT
+        );
+
         CREATE INDEX IF NOT EXISTS idx_logs_date ON daily_logs(date);
         """
     )
@@ -349,3 +358,22 @@ async def get_msg_refs(date: str, kind: str) -> list[dict[str, Any]]:
         "SELECT * FROM msg_refs WHERE date = ? AND kind = ?", (date, kind)
     )
     return [dict(r) for r in await cur.fetchall()]
+
+
+# --------------------------------------------------------------------------- #
+# photos — фото «до/после» для AI-анализа осанки
+# --------------------------------------------------------------------------- #
+async def add_photo(role: str, path: str, note: str = "") -> None:
+    await _conn().execute(
+        "INSERT INTO photos (ts, role, path, note) VALUES (datetime('now'), ?, ?, ?)",
+        (role, path, note),
+    )
+    await _conn().commit()
+
+
+async def latest_photo(role: str) -> dict[str, Any] | None:
+    cur = await _conn().execute(
+        "SELECT * FROM photos WHERE role = ? ORDER BY id DESC LIMIT 1", (role,)
+    )
+    row = await cur.fetchone()
+    return dict(row) if row else None

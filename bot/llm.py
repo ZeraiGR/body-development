@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import base64
 import logging
+import pathlib
 
 import aiohttp
 
@@ -13,6 +15,7 @@ from config import config
 
 log = logging.getLogger(__name__)
 _TIMEOUT = aiohttp.ClientTimeout(total=180)  # локальная 32B может думать; 0B-холодный старт
+VISION_MODEL = "minicpm-v"  # мультимодальная модель для анализа фото осанки
 
 
 async def generate(
@@ -77,3 +80,31 @@ async def _gemini(system, user, history, max_tokens):
     # Gemini имеет свой формат; реализуется при выборе облачного пути.
     log.warning("Gemini backend пока не реализован — fallback")
     return None
+
+
+async def vision_analyze(prompt: str, image_paths: list[str]) -> str | None:
+    """Анализ фото осанки через Ollama (minicpm-v). Текст или None (fallback)."""
+    if config.llm_backend in ("", "none", "off"):
+        return None
+    images: list[str] = []
+    for p in image_paths:
+        try:
+            images.append(base64.b64encode(pathlib.Path(p).read_bytes()).decode())
+        except Exception as exc:
+            log.warning("vision: не прочитать %s: %s", p, exc)
+    if not images:
+        return None
+    payload = {
+        "model": VISION_MODEL,
+        "messages": [{"role": "user", "content": prompt, "images": images}],
+        "stream": False,
+        "options": {"temperature": 0.4, "num_predict": 800},
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+            async with session.post(f"{config.ollama_host}/api/chat", json=payload) as resp:
+                data = await resp.json(content_type=None)
+        return ((data.get("message") or {}).get("content") or "").strip() or None
+    except Exception as exc:
+        log.warning("vision_analyze не удалось: %s — fallback", exc)
+        return None
