@@ -1,0 +1,27 @@
+# ── Секреты (НИКОГДА в репо) ──
+.env
+.env.*
+phone-vpn.json
+
+# ── Runtime-данные: коммитим ТОЛЬКО статьи, НЕ базу/бэкапы ──
+/data/*
+!/data/articles/
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.python-version
+
+# ── IDE / OS / локальное ──
+.idea/
+.vscode/
+.claude/
+.DS_Store
+
+# ── Не в репо: книги/бэкапы ──
+*.pdf
+*.bak
+*.bak_*

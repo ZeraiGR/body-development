@@ -1,0 +1,6 @@
+aiogram>=3.7,<4.0
+APScheduler>=3.10,<4.0
+aiosqlite>=0.19
+python-dotenv>=1.0
+aiohttp-socks>=0.9   # опционально: нужен только для SOCKS-прокси (TG_PROXY=socks5://...)
+# aiohttp приходит транзитивно через aiogram и используется для запросов к Telegraph API
