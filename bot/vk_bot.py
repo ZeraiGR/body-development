@@ -23,6 +23,7 @@ import aiohttp
 from aiogram.types import InlineKeyboardMarkup
 
 from bot import db, llm, llm_context, messages, planner
+from bot.bridge import settle
 
 log = logging.getLogger(__name__)
 
@@ -412,19 +413,24 @@ class VKBot:
             await self._answer_event(event_id, user_id, peer_id, t)
 
         if data == "morning:done":
+            today = planner.today_iso(config_schedule_tz())
             state = await db.get_state()
-            await db.upsert_log(planner.today_iso(config_schedule_tz()), state["current_day"], morning_done=True)
+            await db.upsert_log(today, state["current_day"], morning_done=True)
             await self._edit(peer_id, cmid, None, None)  # снять кнопки, текст оставить
             await toast("Утренний запуск засчитан 🔥")
+            await settle(today, "morning", "vk")
         elif data == "morning:later":
             await self._edit(peer_id, cmid, None, None)
             await toast("Окей, без давления 🌿")
+            await settle(planner.today_iso(config_schedule_tz()), "morning", "vk")
         elif data == "ping:done":
             await self._edit(peer_id, cmid, None, None)
             await toast("👍 Красава, тело скажет спасибо")
+            await settle(planner.today_iso(config_schedule_tz()), "ping", "vk")
         elif data == "ping:skip":
             await self._edit(peer_id, cmid, None, None)
             await toast("Без проблем, в следующий раз 🙂")
+            await settle(planner.today_iso(config_schedule_tz()), "ping", "vk")
         elif data == "theory:done":
             await self._edit(peer_id, cmid, None, None)
             await toast("Прочитано 📖")

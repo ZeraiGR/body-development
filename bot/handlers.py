@@ -17,6 +17,7 @@ from aiogram.types import CallbackQuery, Message
 
 from config import config
 from bot import db, llm, llm_context, messages, planner
+from bot.bridge import settle
 
 router = Router()
 
@@ -219,24 +220,34 @@ async def _settle_cb(cb: CallbackQuery, toast: str) -> None:
 
 @router.callback_query(F.data == "morning:done")
 async def cb_morning_done(cb: CallbackQuery) -> None:
+    today = planner.today_iso(config.schedule.timezone)
+    already = bool((await db.get_log(today) or {}).get("morning_done"))
     state = await db.get_state()
-    await db.upsert_log(planner.today_iso(config.schedule.timezone), state["current_day"], morning_done=True)
-    await _settle_cb(cb, "Утренний запуск засчитан 🔥")
+    await db.upsert_log(today, state["current_day"], morning_done=True)
+    await _settle_cb(cb, "Уже отмечено ✅" if already else "Утренний запуск засчитан 🔥")
+    if not already:
+        await settle(today, "morning", "tg")
 
 
 @router.callback_query(F.data == "morning:later")
 async def cb_morning_later(cb: CallbackQuery) -> None:
+    today = planner.today_iso(config.schedule.timezone)
     await _settle_cb(cb, "Окей, без давления 🌿")
+    await settle(today, "morning", "tg")
 
 
 @router.callback_query(F.data == "ping:done")
 async def cb_ping_done(cb: CallbackQuery) -> None:
+    today = planner.today_iso(config.schedule.timezone)
     await _settle_cb(cb, "👍 Красава, тело скажет спасибо")
+    await settle(today, "ping", "tg")
 
 
 @router.callback_query(F.data == "ping:skip")
 async def cb_ping_skip(cb: CallbackQuery) -> None:
+    today = planner.today_iso(config.schedule.timezone)
     await _settle_cb(cb, "Без проблем, в следующий раз 🙂")
+    await settle(today, "ping", "tg")
 
 
 @router.callback_query(F.data == "theory:done")

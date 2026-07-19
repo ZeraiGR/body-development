@@ -23,6 +23,7 @@ import aiohttp
 from aiogram.types import InlineKeyboardMarkup
 
 from bot import db, llm, llm_context, messages, planner
+from bot.bridge import settle
 
 log = logging.getLogger(__name__)
 
@@ -401,15 +402,20 @@ class MaxBot:
             await self._answer_cb(cid, notification=t)
 
         if data == "morning:done":
+            today = planner.today_iso(_tz())
             st = await db.get_state()
-            await db.upsert_log(planner.today_iso(_tz()), st["current_day"], morning_done=True)
+            await db.upsert_log(today, st["current_day"], morning_done=True)
             await self._answer_cb(cid, notification="Утренний запуск засчитан 🔥", message={"attachments": []})
+            await settle(today, "morning", "max")
         elif data == "morning:later":
             await self._answer_cb(cid, notification="Окей, без давления 🌿", message={"attachments": []})
+            await settle(planner.today_iso(_tz()), "morning", "max")
         elif data == "ping:done":
             await self._answer_cb(cid, notification="👍 Красава", message={"attachments": []})
+            await settle(planner.today_iso(_tz()), "ping", "max")
         elif data == "ping:skip":
             await self._answer_cb(cid, notification="Без проблем 🙂", message={"attachments": []})
+            await settle(planner.today_iso(_tz()), "ping", "max")
         elif data == "theory:done":
             await self._answer_cb(cid, notification="Прочитано 📖", message={"attachments": []})
         elif data == "hard":
