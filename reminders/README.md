@@ -13,7 +13,7 @@
 ## Установка (одна команда)
 
 ```bash
-cd ~/work/body-development/reminders
+cd ~/work/personal-projects/body-development/reminders
 ./spine20ctl.sh install
 ```
 
