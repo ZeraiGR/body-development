@@ -106,11 +106,11 @@ scripts/
 GitHub Actions запускает проверки, но не выполняет SSH и не перезапускает production.
 Выпуск бота — отдельное ручное действие после бэкапа и проверки интерпретатора systemd.
 В `ops/` находится только drop-in бота; он не применяется автоматически.
-`reminders/` — действующий локальный канал напоминаний macOS, не временный скрипт.
 
 ## Связанные проекты
 
 - [personal-docs](https://github.com/ZeraiGR/personal-docs) — единая закрытая документация, раздел `bots`.
+- [spine20](https://github.com/ZeraiGR/spine20) — напоминания о перерывах на Mac.
 - [vaultwarden-ops](https://github.com/ZeraiGR/vaultwarden-ops) — хранилище паролей и резервирование.
 - [vps-infra](https://github.com/ZeraiGR/vps-infra) — ОС, VPN и закрытый хост документации.
 
