@@ -1,12 +1,11 @@
 # Бот реабилитации спины
 
-Личный Telegram-бот-ассистент по реабилитации спины (aiogram 3.x + APScheduler + SQLite).
+Личный бот с каналами Telegram, VK и MAX (aiogram 3.x + APScheduler + SQLite).
 
-> 📐 Подробная техническая документация (архитектура, модель данных, конечный автомат,
-> модель безопасности, журнал решений, выводы) — в **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+> Техническая документация — в [personal-docs, раздел bots](https://github.com/ZeraiGR/personal-docs/tree/main/src/content/docs/bots).
 > Здесь — краткий стартовый гайд.
-Однопользовательский: общается **только** с владельцем (`ALLOWED_CHAT_ID`) и устойчив к
-промпт-инъекциям (полностью шаблонный, без LLM — см. `bot/security.py`).
+Однопользовательский: доступ Telegram ограничен владельцем (`ALLOWED_CHAT_ID`).
+Дополнительные платформы и LLM включаются отдельно; модель доступа проверяется тестами.
 
 Программа описана тремя файлами в корне:
 - **CLAUDE.md** — тон, ежедневная архитектура (утро/день/вечер), механика метрик.
@@ -34,7 +33,7 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock
 
 cp .env.example .env
 # заполни .env:
@@ -49,7 +48,7 @@ python3 scripts/upload_telegraph.py
 ```
 
 Создаст 30 статей и сохранит ссылки в БД. Если `TELEGRAPH_TOKEN` пуст — создаст аккаунт
-и напечатает токен (сохрани его в `.env`, чтобы повторные запуски не плодили страницы).
+и сохранит токен в приватном `.env`, без печати значения в терминал.
 Без залитых ссылок бот тоже работает — в утреннем сообщении будет заглушка вместо ссылки.
 
 ## Запуск
@@ -97,3 +96,24 @@ scripts/
 
 Все тайминги — в `.env` (локальное время в `TIMEZONE`, по умолчанию `Europe/Moscow`):
 `MORNING_TIME`, `EVENING_TIME`, `DAY_PING_START`, `DAY_PING_END`.
+
+## Проверки и выпуск
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+GitHub Actions запускает проверки, но не выполняет SSH и не перезапускает production.
+Выпуск бота — отдельное ручное действие после бэкапа и проверки интерпретатора systemd.
+В `ops/` находится только drop-in бота; он не применяется автоматически.
+`reminders/` — действующий локальный канал напоминаний macOS, не временный скрипт.
+
+## Связанные проекты
+
+- [personal-docs](https://github.com/ZeraiGR/personal-docs) — единая закрытая документация, раздел `bots`.
+- [vaultwarden-ops](https://github.com/ZeraiGR/vaultwarden-ops) — хранилище паролей и резервирование.
+- [vps-infra](https://github.com/ZeraiGR/vps-infra) — ОС, VPN и закрытый хост документации.
+
+Репозитории независимы: для запуска бота не нужны checkout соседних проектов.
+Runtime env, базы и ключи никогда не коммитятся. Публичные иллюстрации в `assets/`
+используются статьями по GitHub raw URL; их доступность не меняется при разделении.

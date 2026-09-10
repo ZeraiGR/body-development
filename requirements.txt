@@ -1,6 +1,7 @@
-aiogram>=3.7,<4.0
-APScheduler>=3.10,<4.0
-aiosqlite>=0.19
-python-dotenv>=1.0
-aiohttp-socks>=0.9   # опционально: нужен только для SOCKS-прокси (TG_PROXY=socks5://...)
-# aiohttp приходит транзитивно через aiogram и используется для запросов к Telegraph API
+# Production: pip install -r requirements.lock (tested Python 3.12).
+aiogram>=3.31,<4.0
+APScheduler>=3.11.3,<4.0
+aiosqlite>=0.22.1,<0.23
+python-dotenv>=1.2.3,<2
+aiohttp>=3.14.3,<3.15
+aiohttp-socks>=0.12,<0.13

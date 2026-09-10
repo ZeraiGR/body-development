@@ -1,6 +1,7 @@
 # ── Секреты (НИКОГДА в репо) ──
 .env
 .env.*
+!/.env.example
 phone-vpn.json
 
 # ── Runtime-данные: коммитим ТОЛЬКО статьи, НЕ базу/бэкапы ──
@@ -19,6 +20,7 @@ venv/
 .idea/
 .vscode/
 .claude/
+.serena/
 .DS_Store
 
 # ── Не в репо: книги/бэкапы ──

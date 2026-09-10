@@ -1,4 +1,4 @@
-"""LLM-бэкенд с fallback. Основной — локальная Ollama (см. docs/LLM_INTEGRATION_RESEARCH.md).
+"""LLM-бэкенд с fallback. Настройки описаны в personal-docs, bots/configuration.
 
 Контракт: generate() возвращает текст ответа либо None (backend=none или сбой).
 Вызывающий при None откатывается на шаблон — бот никогда не молчит и не ломается.

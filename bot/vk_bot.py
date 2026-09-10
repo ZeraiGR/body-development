@@ -237,7 +237,7 @@ class VKBot:
     async def _on_message(self, msg: dict) -> None:
         peer_id = msg.get("peer_id")
         text = (msg.get("text") or "").strip()
-        log.info("VK message: peer=%s from=%s text=%r", peer_id, msg.get("from_id"), text[:60])
+        log.debug("VK message received")
         if peer_id != self.owner:
             log.info("VK: отброшено (peer %s != owner %s)", peer_id, self.owner)
             return  # приватный канал: только владелец

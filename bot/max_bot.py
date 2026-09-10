@@ -4,8 +4,8 @@
 db / messages / planner / llm / llm_context — дублируется только транспорт
 и диспетчер команд/колбэков. TG/VK не трогаются.
 
-Однопользовательский: owner chat_id авто-learnится по первому `bot_started`
-(или входящему сообщению) и сохраняется в БД; далее бот отвечает только ему.
+Однопользовательский: chat_id берётся из сохранённой привязки или MAX_OWNER_CHAT_ID.
+Новый владелец не назначается по входящему сообщению.
 Markdown MAX поддерживает (format:"markdown").
 
 Long Poll (`GET /updates`) запускается asyncio-таском в одном цикле с TG/VK.
@@ -14,8 +14,8 @@ API: https://platform-api2.max.ru, авторизация — заголовок
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
+import os
 import ssl
 from pathlib import Path
 
@@ -116,7 +116,10 @@ class MaxBot:
         if isinstance(me, dict) and me.get("code") and me.get("message"):
             raise RuntimeError(f"MAX /me error: {me.get('code')} {me.get('message')}")
         name = me.get("name") if isinstance(me, dict) else None
-        self.owner_chat_id = await db.get_chat_id("max")  # мог сохраниться ранее
+        self.owner_chat_id = await db.get_chat_id("max") or os.getenv("MAX_OWNER_CHAT_ID", "").strip() or None
+        if not self.owner_chat_id:
+            raise RuntimeError("MAX: задайте MAX_OWNER_CHAT_ID для первоначальной привязки")
+        await db.set_channel("max", chat_id=self.owner_chat_id)
         log.info("MAX-бот инициализирован: name=%s owner_chat=%s", name, self.owner_chat_id)
 
     async def close(self) -> None:
@@ -200,23 +203,23 @@ class MaxBot:
                 await asyncio.sleep(5)
 
     async def _dispatch(self, up: dict) -> None:
-        log.info("MAX raw update: %s", json.dumps(up, ensure_ascii=False)[:800])
         # MAX: тип в «update_type», объект события (message/callback) — на верхнем уровне.
         utype = up.get("update_type") or up.get("type")
+        log.debug("MAX event type=%s", utype)
         if utype == "bot_started":
             await self._on_started(up)
         elif utype == "message_created":
             await self._on_message(up.get("message") or {})
         elif utype == "message_callback":
-            await self._on_callback(up.get("callback") or {})
+            callback = dict(up.get("callback") or {})
+            callback["message"] = up.get("message") or callback.get("message") or {}
+            await self._on_callback(callback)
 
     # --------------------------- owner / whitelist ------------------------ #
     async def _learn_owner(self, chat_id: str | None, user_id: str | None) -> bool:
-        """Запомнить владельца при первом контакте. True если событие от владельца."""
-        if chat_id and not self.owner_chat_id:
-            self.owner_chat_id = chat_id
-            await db.set_channel("max", chat_id=chat_id)
-            log.info("MAX owner_chat_id learn: %s", chat_id)
+        """Проверить сохранённый личный чат до любых изменений состояния."""
+        if not self.owner_chat_id or not chat_id or chat_id != self.owner_chat_id:
+            return False
         if user_id and not self._owner_user_id:
             self._owner_user_id = user_id
         if self._owner_user_id and user_id and user_id != self._owner_user_id:
@@ -226,7 +229,8 @@ class MaxBot:
     async def _on_started(self, body: dict) -> None:
         chat_id = _extract_chat_id(body) or _extract_chat_id(body.get("chat") or {})
         user_id = _msg_user_id(body) or _msg_user_id(body.get("user") or {})
-        await self._learn_owner(chat_id, user_id)
+        if not await self._learn_owner(chat_id, user_id):
+            return
         cid = chat_id or self.owner_chat_id
         if cid:
             await self._send_to(cid, messages.welcome_text())
@@ -394,7 +398,7 @@ class MaxBot:
         data = cb.get("payload") or cb.get("callback_data") or ""
         user_id = _msg_user_id(cb)
         msg = cb.get("message") or {}
-        chat_id = _extract_chat_id(msg) or self.owner_chat_id
+        chat_id = _extract_chat_id(msg)
         if not await self._learn_owner(chat_id, user_id):
             return
 

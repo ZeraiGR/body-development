@@ -9,13 +9,12 @@
 """
 from __future__ import annotations
 
-from aiohttp import ClientTimeout
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 
-_TIMEOUT = ClientTimeout(total=30)
+_TIMEOUT = 30.0
 
 
 def build_bot(
@@ -27,18 +26,7 @@ def build_bot(
     if not proxy:
         return Bot(token=token, default=DefaultBotProperties(parse_mode=parse_mode))
 
-    low = proxy.lower()
-    if low.startswith("socks"):
-        try:
-            from aiohttp_socks import ProxyConnector
-        except ImportError as exc:
-            raise RuntimeError(
-                "Для SOCKS-прокси установи пакет: pip install aiohttp-socks"
-            ) from exc
-        session = AiohttpSession(
-            connector=ProxyConnector.from_url(proxy), timeout=_TIMEOUT
-        )
-    else:  # http:// или https://
-        session = AiohttpSession(proxy=proxy, timeout=_TIMEOUT)
+    # aiogram owns connector construction for both HTTP and SOCKS URLs.
+    session = AiohttpSession(proxy=proxy, timeout=_TIMEOUT)
 
     return Bot(token=token, session=session, default=DefaultBotProperties(parse_mode=parse_mode))
