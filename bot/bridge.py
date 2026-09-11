@@ -8,10 +8,11 @@ no-op (действие уже отмечено в daily_logs).
 from __future__ import annotations
 
 import logging
+import re
 
 from aiogram.exceptions import TelegramBadRequest
 
-from bot import db
+from bot import db, messages
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,26 @@ class Bridge:
 
 
 bridge = Bridge()
+
+
+async def refresh_morning(date: str) -> None:
+    """Remove only the completed movement button; keep reading and links."""
+    for ref in await db.get_msg_refs(date, 'morning'):
+        match = re.search(r'День (\d+)', ref.get('text') or '')
+        if not match:
+            continue
+        day = int(match[1])
+        _, kb = messages.morning_text(day, await db.get_telegraph_link(day), done=True)
+        try:
+            if ref['platform'] == 'tg' and bridge.tg is not None:
+                await bridge.tg.edit_message_reply_markup(
+                    chat_id=int(ref['chat_id']), message_id=int(ref['message_id']), reply_markup=kb)
+            elif ref['platform'] == 'max' and bridge.max is not None:
+                await bridge.max._edit(ref['message_id'], ref['text'], kb)
+        except TelegramBadRequest:
+            pass
+        except Exception:
+            log.exception('Could not refresh morning buttons on %s', ref['platform'])
 
 
 async def settle(date: str, kind: str, from_platform: str) -> None:
@@ -39,7 +60,7 @@ async def settle(date: str, kind: str, from_platform: str) -> None:
         try:
             if r["platform"] == "tg" and bridge.tg is not None:
                 await bridge.tg.edit_message_reply_markup(
-                    int(r["chat_id"]), int(r["message_id"]), reply_markup=None
+                    chat_id=int(r["chat_id"]), message_id=int(r["message_id"]), reply_markup=None
                 )
             elif r["platform"] == "max" and bridge.max is not None:
                 await bridge.max._edit(r["message_id"], r.get("text") or "✅", None)

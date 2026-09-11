@@ -22,7 +22,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from config import config
-from bot import db, messages, planner
+from bot import db, messages, planner, journey
 
 log = logging.getLogger(__name__)
 
@@ -141,6 +141,8 @@ class BotScheduler:
                 await db.update_state(**updates)
                 state.update(updates)
             if await db.was_sent(today, "morning"):
+                if planner.is_sunday(config.schedule.timezone):
+                    await self._send_weekly(state['current_day'])
                 return
 
             day = state["current_day"]
@@ -158,9 +160,7 @@ class BotScheduler:
         today = self._today()
         if await db.was_sent(today, "weekly"):
             return
-        tz = config.schedule.timezone
-        logs = await db.logs_between(planner.date_iso(-6, tz), today)
-        await self._send(messages.weekly_report_text(logs, tz, day))
+        await self._send(await journey.report())
         await db.mark_sent(today, "weekly")
 
     async def _send_ping(self) -> None:
@@ -197,7 +197,7 @@ class BotScheduler:
             state = await db.get_state()
             if state["paused"]:
                 return
-            text, kb = messages.evening_intro_text(state["current_day"])
+            text, kb = await journey.evening()
             await self._send(text, kb)
             await db.mark_sent(today, "evening")
             log.info("Отправлен вечер за %s", today)

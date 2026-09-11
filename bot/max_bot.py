@@ -22,8 +22,8 @@ from pathlib import Path
 import aiohttp
 from aiogram.types import InlineKeyboardMarkup
 
-from bot import db, llm, llm_context, messages, planner
-from bot.bridge import settle
+from bot import journey, db, llm, llm_context, messages, planner
+from bot.bridge import settle, refresh_morning
 
 log = logging.getLogger(__name__)
 
@@ -256,7 +256,7 @@ class MaxBot:
             "start": lambda: self._reply(cid, messages.welcome_text()),
             "help": lambda: self._reply(cid, self._help()),
             "status": lambda: self._cmd_status(cid),
-            "report": lambda: self._cmd_report(cid),
+            "report": lambda: self._cmd_report(cid, args),
             "pause": lambda: self._cmd_pause(cid),
             "resume": lambda: self._cmd_resume(cid),
             "next": lambda: self._cmd_next(cid),
@@ -270,6 +270,8 @@ class MaxBot:
             "remember": lambda: self._cmd_remember(cid),
             "mute": lambda: self._cmd_mute(cid),
             "unmute": lambda: self._cmd_unmute(cid),
+            "lessons": lambda: self._cmd_lessons(cid),
+            "continue": lambda: self._cmd_continue(cid, args),
             "goto": lambda: self._cmd_goto(cid, args),
         }
         if name in handlers:
@@ -285,13 +287,13 @@ class MaxBot:
             "/status — где я сейчас (день/неделя/стрик)\n"
             "/today — утреннее сообщение дня\n"
             "/evening — вечерний опрос · /ping — микро-пинг\n"
-            "/report — недельный отчёт\n"
+            "/report [ГГГГ-ММ-ДД] — неделя до выбранной даты\n"
             "/theory N — теория дня N\n"
             "/chat <текст> — ИИ (или просто напиши текст)\n"
             "/remember — обновить память ИИ\n"
             "/mute — отключить рассылки в этом мессенджере · /unmute — вернуть\n"
             "/pause · /resume · /next · /hard · /reset — программа\n"
-            "/goto N — перейти на любой день (1–30)"
+            "/goto N — открыть урок · /continue N — продолжить с дня N · /lessons — все темы"
         )
 
     async def _reply(self, cid: str, text: str, tg_kb: InlineKeyboardMarkup | None = None) -> None:
@@ -310,11 +312,8 @@ class MaxBot:
         url = await db.get_telegraph_link(st["current_day"])
         await self._reply(cid, messages.status_text(st, url))
 
-    async def _cmd_report(self, cid: str) -> None:
-        tz = _tz()
-        st = await db.get_state()
-        logs = await db.logs_between(planner.date_iso(-6, tz), planner.today_iso(tz))
-        await self._reply(cid, messages.weekly_report_text(logs, tz, st["current_day"]))
+    async def _cmd_report(self, cid: str, args: str = "") -> None:
+        await self._reply(cid, await journey.report(args))
 
     async def _cmd_pause(self, cid: str) -> None:
         await db.update_state(paused=1)
@@ -336,9 +335,7 @@ class MaxBot:
         await self._reply(cid, messages.hard_confirm_text(extra))
 
     async def _cmd_reset(self, cid: str) -> None:
-        await db.update_state(current_day=1, week_extra_days=0, last_morning_date=None,
-                              last_log_date=None, streak=0, paused=0)
-        await self._reply(cid, "🔄 Сброс. Снова День 1. 🌱")
+        await self._reply(cid, await journey.reset())
 
     async def _cmd_today(self, cid: str) -> None:
         st = await db.get_state()
@@ -347,23 +344,21 @@ class MaxBot:
         await self._reply(cid, text, kb)
 
     async def _cmd_theory(self, cid: str, args: str) -> None:
-        day = int(args) if args.strip().isdigit() and 1 <= int(args) <= 30 else (await db.get_state())["current_day"]
-        url = await db.get_telegraph_link(day)
-        text, kb = messages.theory_text(day, url)
+        text, kb = await journey.lesson(args.strip())
         await self._reply(cid, text, kb)
 
     async def _cmd_goto(self, cid: str, args: str) -> None:
-        if not args.strip().isdigit():
-            await self._reply(cid, "Напиши: /goto N (1–30). Например /goto 3.")
-            return
-        day = max(1, min(30, int(args.strip())))
-        await db.update_state(current_day=day)
-        url = await db.get_telegraph_link(day)
-        await self._reply(cid, f"📍 Переключился на день {day}. /today — утреннее сообщение." + (f"\n🔗 {url}" if url else ""))
+        await self._cmd_theory(cid, args)
+
+    async def _cmd_lessons(self, cid: str) -> None:
+        text, kb = await journey.lesson_list()
+        await self._reply(cid, text, kb)
+
+    async def _cmd_continue(self, cid: str, args: str) -> None:
+        await self._reply(cid, await journey.continue_from(args.strip()))
 
     async def _cmd_evening(self, cid: str) -> None:
-        st = await db.get_state()
-        text, kb = messages.evening_intro_text(st["current_day"])
+        text, kb = await journey.evening()
         await self._reply(cid, text, kb)
 
     async def _cmd_ping(self, cid: str) -> None:
@@ -405,71 +400,28 @@ class MaxBot:
         async def notify(t: str) -> None:
             await self._answer_cb(cid, notification=t)
 
-        if data == "morning:done":
-            today = planner.today_iso(_tz())
-            st = await db.get_state()
-            await db.upsert_log(today, st["current_day"], morning_done=True)
-            await self._answer_cb(cid, notification="Утренний запуск засчитан 🔥", message={"attachments": []})
-            await settle(today, "morning", "max")
-        elif data == "morning:later":
-            await self._answer_cb(cid, notification="Окей, без давления 🌿", message={"attachments": []})
-            await settle(planner.today_iso(_tz()), "morning", "max")
-        elif data == "ping:done":
+        if data.startswith(("learn:", "move:", "check:")):
+            await self._answer_cb(cid, notification="")
+            text, kb = await journey.action(data)
+            if data.startswith("move:" + planner.today_iso(_tz()) + ":") and (await db.get_log(planner.today_iso(_tz())) or {}).get("morning_done"):
+                await refresh_morning(planner.today_iso(_tz()))
+            await self._reply(chat_id, text, kb)
+            return
+        if data in ("morning:done", "morning:later", "theory:done") or data.startswith(("pl:", "loc:", "habits:")):
+            await notify("Старая кнопка. Открой /today, /theory или /evening.")
+            return
+
+        if data == "ping:done":
             await self._answer_cb(cid, notification="👍 Красава", message={"attachments": []})
             await settle(planner.today_iso(_tz()), "ping", "max")
         elif data == "ping:skip":
             await self._answer_cb(cid, notification="Без проблем 🙂", message={"attachments": []})
             await settle(planner.today_iso(_tz()), "ping", "max")
-        elif data == "theory:done":
-            await self._answer_cb(cid, notification="Прочитано 📖", message={"attachments": []})
         elif data == "hard":
             extra = 2
             await db.update_state(week_extra_days=extra)
             await self._send_to(chat_id, messages.hard_confirm_text(extra))
             await self._answer_cb(cid, notification="Задерживаемся 🌿", message={"attachments": []})
-        elif data.startswith("pl:"):
-            raw = data.split(":", 1)[1]
-            if not (raw.isdigit() and 0 <= int(raw) <= 3):
-                await notify(""); return
-            day = (await db.get_state())["current_day"]
-            await db.upsert_log(planner.today_iso(_tz()), day, pain=int(raw))
-            text, kb = messages.locations_prompt()
-            await self._answer_cb(cid, notification="", message=_cb_message(text, kb))
-        elif data.startswith("loc:"):
-            loc = data.split(":", 1)[1] if ":" in data else ""
-            if loc not in messages._LOCATIONS:
-                await notify(""); return
-            day = (await db.get_state())["current_day"]
-            await db.upsert_log(planner.today_iso(_tz()), day, note=loc)
-            text, kb = messages.habits_prompt()
-            await self._answer_cb(cid, notification="", message=_cb_message(text, kb))
-        elif data.startswith("habits:"):
-            await self._handle_habits(data, chat_id, cid, cb)
-
-    async def _handle_habits(self, data: str, chat_id: str, callback_id, cb: dict) -> None:
-        """Финал вечернего опроса: привычки → фидбек + стрик (зеркало cb_habits)."""
-        code = data.split(":", 1)[1] if ":" in data else ""
-        if code not in ("yes", "partial", "no"):
-            await self._answer_cb(callback_id, notification="")
-            return
-        habits_done = code in ("yes", "partial")
-        tz = _tz()
-        today = planner.today_iso(tz)
-        state = await db.get_state()
-        day = state["current_day"]
-        today_log = await db.get_log(today) or {}
-        pain_level = today_log.get("pain")
-        location = today_log.get("note")
-        await db.upsert_log(today, day, habits_done=habits_done, evening_done=True)
-        new_streak, changed = await planner.update_streak(state, tz)
-        if changed:
-            await db.update_state(streak=new_streak, last_log_date=today)
-        if pain_level is None:
-            await self._answer_cb(callback_id, notification="",
-                                  message=_cb_message("Засчитал вечер ✅ Завтра снова соберём метрики.", None))
-        else:
-            text, kb = messages.feedback_text(day, pain_level, location, new_streak)
-            await self._answer_cb(callback_id, notification="", message=_cb_message(text, kb))
 
 
 def _cb_message(text: str, tg_kb: InlineKeyboardMarkup | None) -> dict:
@@ -479,16 +431,6 @@ def _cb_message(text: str, tg_kb: InlineKeyboardMarkup | None) -> dict:
     if att:
         msg["attachments"] = att
     return msg
-
-
-def _parse_rating(data: str, prefix: str) -> int | None:
-    if not data.startswith(f"{prefix}:"):
-        return None
-    raw = data.split(":", 1)[1]
-    if not raw.isdigit():
-        return None
-    v = int(raw)
-    return v if 1 <= v <= 10 else None
 
 
 def _tz() -> str:

@@ -1,19 +1,20 @@
 """Шаблоны сообщений и клавиатур (детерминированные, без LLM).
 
 Тон (CLAUDE.md): дружелюбный, системный, без давления, evidence-based.
-Фидбек строится по формуле §5: [Подтверждение усилий] + [Научный факт]
-+ [Связь с привычкой].
+Чтение, движение и самочувствие учитываются отдельно.
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
+import math
+import re
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot.content import program
 from bot.content.articles import get_article
-from bot.content.quotes import get_quote
+from config import config
 from bot import planner
 
 
@@ -36,24 +37,9 @@ def _plural_days(n: int) -> str:
     return "дней"
 
 
-def _ratings_kb(prefix: str, n: int = 10) -> InlineKeyboardMarkup:
-    """Клавиатура 1..n для оценки боли/жёсткости."""
-    kb = InlineKeyboardBuilder()
-    for value in range(1, n + 1):
-        kb.button(text=str(value), callback_data=f"{prefix}:{value}")
-    kb.adjust(5)  # две строки по 5
-    return kb.as_markup()
-
-
 # --------------------------------------------------------------------------- #
 # Клавиатуры
 # --------------------------------------------------------------------------- #
-def morning_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Сделал", callback_data="morning:done")
-    kb.button(text="⏰ Позже", callback_data="morning:later")
-    kb.adjust(2)
-    return kb.as_markup()
 
 
 def ping_kb() -> InlineKeyboardMarkup:
@@ -61,40 +47,6 @@ def ping_kb() -> InlineKeyboardMarkup:
     kb.button(text="✅ Сделал", callback_data="ping:done")
     kb.button(text="⏩ Пропустить", callback_data="ping:skip")
     kb.adjust(2)
-    return kb.as_markup()
-
-
-def pain_kb() -> InlineKeyboardMarkup:
-    """4 уровня боли вместо шкалы 1-10 — гораздо легче оценить."""
-    levels = [("Нет", 0), ("Слабо", 1), ("Умеренно", 2), ("Сильно", 3)]
-    kb = InlineKeyboardBuilder()
-    for label, val in levels:
-        kb.button(text=label, callback_data=f"pl:{val}")
-    kb.adjust(2, 2)
-    return kb.as_markup()
-
-
-_LOCATIONS = ["поясница", "шея", "грудь", "правая", "левая"]
-
-
-def locations_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    for loc in _LOCATIONS:
-        kb.button(text=loc.capitalize(), callback_data=f"loc:{loc}")
-    kb.adjust(3)
-    return kb.as_markup()
-
-
-def stiffness_kb() -> InlineKeyboardMarkup:
-    return _ratings_kb("stiff")
-
-
-def habits_kb() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Выполнил ритуал", callback_data="habits:yes")
-    kb.button(text="😐 Частично", callback_data="habits:partial")
-    kb.button(text="😴 Не сегодня", callback_data="habits:no")
-    kb.adjust(1)
     return kb.as_markup()
 
 
@@ -108,164 +60,136 @@ def feedback_kb() -> InlineKeyboardMarkup:
 # --------------------------------------------------------------------------- #
 # Тексты: утро / день / вечер
 # --------------------------------------------------------------------------- #
-def theory_text(day: int, telegraph_url: str | None) -> str:
-    """Полный текст теории дня (тело статьи) — отдельным сообщением, инлайн."""
-    article = get_article(day)
-    body = "\n\n".join(article["paragraphs"])
-    link = f"\n\n🔗 {telegraph_url}" if telegraph_url else ""
-    return f"📚 *День {day} · {article['title']}*\n\n{body}{link}"
+def lesson_pages(day: int) -> list[str]:
+    """Telegram-sized pages, split only between paragraphs."""
+    article = get_article(day) or {}
+    body = article.get("body_markdown", article.get("green", ""))
+    body = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", body)
+    body = re.sub(r"^#{1,4} (.+)$", r"*\1*", body, flags=re.MULTILINE)
+    body = body.replace("**", "*")
+    pages, current = [], ""
+    paragraphs = [p.strip() for p in body.split('\n\n') if p.strip()]
+    blocks = []
+    pending_heading = ''
+    for paragraph in paragraphs:
+        if re.fullmatch(r'\*[^*\n]+\*', paragraph):
+            pending_heading += paragraph + '\n\n'
+            continue
+        blocks.append(pending_heading + paragraph)
+        pending_heading = ''
+    if pending_heading:
+        blocks.append(pending_heading.strip())
+    for paragraph in blocks:
+        if len(current) + len(paragraph) + 2 > 1200:
+            if current:
+                pages.append(current)
+            current = ""
+        # Future editorial mistakes must not create an oversized message.
+        while len(paragraph) > 1200:
+            cut = paragraph.rfind(" ", 0, 1200)
+            cut = cut if cut > 0 else 1200
+            pages.append(paragraph[:cut])
+            paragraph = paragraph[cut:].strip()
+        current += ("\n\n" if current else "") + paragraph
+    if current:
+        pages.append(current)
+    return pages or ["Этот урок пока готовится."]
 
 
-def morning_text(day: int, telegraph_url: str | None) -> tuple[str, InlineKeyboardMarkup]:
-    week = program.week_for_day(day)
-    week_data = program.WEEKS[week]
-    stage_name, _ = planner.stage_for_day(day)
-    article = get_article(day)
-    book = get_quote(day)
-
-    book_line = ""
-    if book:
-        book_line = (
-            f"\n📖 *Move Your DNA:* {book['concept']}\n"
-            f"_{book['quote']}_ — стр. {book['page']}\n"
-        )
-    read_line = f"\n📚 *Читать урок целиком:* 🔗 {telegraph_url}\n" if telegraph_url else ""
-    green = article.get("green") or ""
-    yellow = article.get("yellow")
-    green_line = f"🟢 *Обязательно к усвоению:* {green}\n" if green else ""
-    yellow_line = f"🟡 _Опционально (углубление):_ {yellow}\n" if yellow else ""
-
-    text = (
-        f"☀️ *Доброе утро!* День {day} · Неделя {week}\n"
-        f"🧭 Стадия: _{stage_name}_\n\n"
-        f"💧 Выпей стакан воды и сделай 3 глубоких вдоха животом "
-        f"(рука на животе — он надувается).\n\n"
-        f"{green_line}"
-        f"{yellow_line}"
-        f"{read_line}"
-        f"{book_line}\n"
-        f"📋 *Утро:*\n{_bullets(week_data['morning'])}\n\n"
-        f"Сделал утренний запуск?"
-    )
-    return text, morning_kb()
-
-
-def theory_kb(telegraph_url: str | None) -> InlineKeyboardMarkup:
-    """Клавиатура /theory: кнопка-ссылка на статью + «Прочитал» (убирается по клику)."""
+def theory_kb(telegraph_url: str | None, day: int = 1, *, read: bool = False, page: int = 0) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
+    kb.button(text="📖 Продолжить чтение" if page else "📖 Читать здесь", callback_data=f"learn:open:{day}")
+    article = get_article(day) or {}
+    if article.get('image'):
+        kb.button(text="Посмотреть движение", url=article['image']['url'])
     if telegraph_url:
-        kb.button(text="📖 Открыть статью", url=telegraph_url)
-    kb.button(text="✅ Прочитал", callback_data="theory:done")
+        kb.button(text="Открыть статью с иллюстрацией", url=telegraph_url)
+        kb.button(text="✓ Прочитал статью", callback_data=f"learn:done:{day}:{planner.today_iso(config.schedule.timezone)}")
+    if read:
+        kb.button(text="✓ Прочитано · перечитать", callback_data=f"learn:page:{day}:0")
+    kb.button(text="Все темы", callback_data="learn:list:0")
+    kb.adjust(1)
     return kb.as_markup()
 
 
-def theory_text(day: int, telegraph_url: str | None) -> tuple[str, InlineKeyboardMarkup]:
-    """Напоминание теории дня: заголовок + главный факт + ссылка на Telegraph."""
+def theory_text(day: int, telegraph_url: str | None, *, read_at: str | None = None, page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     article = get_article(day) or {}
     title = article.get("title", f"День {day}")
-    green = article.get("green", "")
-    read_line = (
-        f"\n\n📚 *Читать целиком:* 🔗 {telegraph_url}"
-        if telegraph_url
-        else "\n\n(статья пока не загружена)"
-    )
+    minutes = max(1, math.ceil(len(article.get("body_markdown", "").split()) / 180))
+    status = f"\n✓ Уже прочитано {read_at}. Можно вернуться к любому фрагменту." if read_at else ""
     text = (
-        f"📖 *День {day}* — {title}\n\n"
-        f"🟢 {green}"
-        f"{read_line}"
+        f"📖 *День {day} · {title}*\n{minutes} мин чтения{status}\n\n"
+        f"{article.get('teaser', article.get('green', ''))}\n\n"
+        f"*Попробовать сегодня:* {article.get('action', '')}\n\n"
+        "Место чтения сохранится. Можно вернуться к нему позже."
     )
-    return text, theory_kb(telegraph_url)
+    return text, theory_kb(telegraph_url, day, read=bool(read_at), page=page)
+
+
+def lesson_page_text(day: int, page: int, telegraph_url: str | None) -> tuple[str, InlineKeyboardMarkup]:
+    article = get_article(day) or {}
+    pages = lesson_pages(day)
+    page = max(0, min(page, len(pages) - 1))
+    text = f"📖 *{article.get('title', '')}*\nФрагмент {page + 1} из {len(pages)}\n\n{pages[page]}"
+    kb = InlineKeyboardBuilder()
+    if page > 0:
+        kb.button(text="← Назад", callback_data=f"learn:page:{day}:{page-1}")
+    if page < len(pages) - 1:
+        kb.button(text="Читать дальше →", callback_data=f"learn:page:{day}:{page+1}")
+    else:
+        video = article.get("video")
+        if video:
+            text += f"\n\n🎬 *Посмотреть:* {video['title']}\n{video['author']} · {video['language']}\n{video['why']}"
+            kb.button(text="🎬 Видео по теме", url=video["url"])
+        text += f"\n\n*Попробуй сейчас:* {article.get('action', '')}"
+        kb.button(text="✓ Прочитал", callback_data=f"learn:done:{day}:{planner.today_iso(config.schedule.timezone)}")
+    if article.get('image'):
+        kb.button(text="Посмотреть движение", url=article['image']['url'])
+    if telegraph_url:
+        kb.button(text="Статья с иллюстрацией", url=telegraph_url)
+    kb.button(text="К теме", callback_data=f"learn:card:{day}")
+    kb.adjust(1)
+    return text, kb.as_markup()
+
+
+def morning_text(day: int, telegraph_url: str | None, *, done: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    article = get_article(day) or {}
+    today = planner.today_iso(config.schedule.timezone)
+    text = (
+        f"☀️ *{article.get('title', 'Немного движения')}*\nДень {day} · неделя {program.week_for_day(day)}\n\n"
+        f"{article.get('teaser', article.get('green', ''))}\n\n"
+        f"*Первый шаг:* {article.get('action', 'Пройдись минуту в удобном темпе.')}\n\n"
+        "Урок можно прочитать прямо здесь, по небольшому фрагменту."
+    )
+    kb = InlineKeyboardBuilder.from_markup(theory_kb(telegraph_url, day))
+    if not done:
+        kb.button(text="✓ Попробовал движение", callback_data=f"move:{today}:{day}")
+    kb.adjust(1)
+    return text, kb.as_markup()
 
 
 def day_ping_text() -> tuple[str, InlineKeyboardMarkup]:
     variants = [
-        "🧘 *Перерыв!* Встань на 2 минуты, разомни шею и грудь. "
-        "Если совсем не хочется вставать — надень миостимулятор на 15 минут.",
-        "⏰ *Микро-пауза.* 30 секунд: встань, потянись руками вверх, "
-        "сделай 2 глубоких вдоха. Диск спины скажет спасибо.",
-        "🚶 *Время разминки!* Пройдись до окна и обратно, расправь плечи. "
-        "Тело запроектировано под движение, а не под статику.",
+        "🚶 Освободи себе минуту: встань и пройдись в удобном темпе. Можно просто до окна и обратно.",
+        "🌿 Закончил небольшое дело? Смени положение, отпусти плечи и сделай несколько шагов.",
+        "⏰ Короткая пауза для тела. Отодвинь стул и немного походи. Начать можно с тридцати секунд.",
     ]
     return planner.pick_random(variants), ping_kb()
 
 
-def evening_intro_text(day: int) -> tuple[str, InlineKeyboardMarkup]:
-    week = program.week_for_day(day)
-    week_data = program.WEEKS[week]
-    stage_name, _ = planner.stage_for_day(day)
-
-    text = (
-        f"🌙 *Вечер!* День {day} · Неделя {week}\n"
-        f"🧭 Стадия: _{stage_name}_\n\n"
-        f"🎮 Включай сериал или Доту — а спину положи на аппликатор "
-        f"Кузнецова минут на 15. Так и отдыхаешь, и спина заодно "
-        f"размягчается, без отдельных усилий.\n\n"
-        f"📋 *Вечерний ритуал:*\n{_bullets(week_data['evening'])}\n\n"
-        f"💡 {week_data.get('book_note', '')}\n\n"
-        f"💤 *Как спина сегодня?*"
-    )
-    return text, pain_kb()
-
-
-def locations_prompt() -> tuple[str, InlineKeyboardMarkup]:
-    return "📍 *Где сильнее всего сегодня?* (один главный участок)", locations_kb()
-
-
-def stiffness_prompt() -> tuple[str, InlineKeyboardMarkup]:
-    return "🪨 *Насколько «каменной» ощущается правая сторона?* (1–10, где 10 — камень)", stiffness_kb()
-
-
-def habits_prompt() -> tuple[str, InlineKeyboardMarkup]:
-    return "✅ *Выполнил вечерний ритуал (аппликатор / мячик / мостик)?*", habits_kb()
-
-
 # --------------------------------------------------------------------------- #
-# Вечерний фидбек (формула §5)
+# Ответ после вечерней записи
 # --------------------------------------------------------------------------- #
-def feedback_text(
-    day: int,
-    pain_level: int,
-    location: str | None,
-    streak: int,
-) -> tuple[str, InlineKeyboardMarkup]:
-    stage_name, stage_fact = planner.stage_for_day(day)
-    week = program.week_for_day(day)
-
-    # 1. Подтверждение усилий
-    if streak >= 2:
-        effort = f"Красавчик, уже {streak} {_plural_days(streak)} подряд 💪"
-    else:
-        effort = "Ты молодец, что не бросаешь 💪"
-
-    # Боль — оценка по уровню (0..3)
-    lvl_comments = {
-        0: "Боли нет сегодня — отличная динамика 📉",
-        1: "Боль слабая — держим спокойный темп.",
-        2: "Боль умеренная — продолжаем в том же режиме.",
-        3: "Боль сильная сегодня. Если тяжело — можно задержаться на неделе (кнопка ниже).",
+def feedback_text(day: int, pain_level: int | None, location: str | None, streak: int) -> tuple[str, InlineKeyboardMarkup]:
+    comments = {
+        0: "Сегодня спина не беспокоила. Сохрани удобный темп, без обязательного усложнения.",
+        1: "Отметили слабый дискомфорт. Завтра ориентируйся на переносимость знакомых движений.",
+        2: "При умеренном дискомфорте можно уменьшить объём или амплитуду. Усиливающую боль нагрузку останови.",
+        3: "При сильной боли не продавливай упражнение. Если боль нарастает или мешает обычным делам, обратись к врачу.",
     }
-    pain_line = lvl_comments.get(pain_level, "Спасибо за метрику.")
-
-    where = f"Участок: *{location}*." if location else ""
-
-    # 2. Научный факт об эффекте текущего этапа
-    science = f"Сейчас идёт этап «*{stage_name}*»: {stage_fact}."
-
-    # 3. Связь с привычкой (по неделе)
-    habit_tips = {
-        1: "Завтра во время сериала или Доты полежи на аппликаторе чуть дольше — фасции размягчаются именно от регулярности.",
-        2: "Завтра добавь ягодичный мостик по технике — проснувшиеся ягодицы заберут нагрузку у поясницы.",
-        3: "Завтра попробуй мячик под правую лопатку на 60 секунд — точечный релиз мягчит «каменную» сторону.",
-        4: "Ты на финальной неделе — держи рутину, она уже работает на тебя. Совсем скоро подведём итог месяца.",
-    }
-    habit = habit_tips[week]
-
-    parts = [effort, pain_line]
-    if where:
-        parts.append(where)
-    parts.append(science)
-    parts.append(habit)
-    return "\n\n".join(parts), feedback_kb()
+    text = "✓ Вечерняя запись сохранена.\n\n" + comments.get(pain_level, "Спасибо за запись.")
+    text += "\n\nЗавтра достаточно начать с одного знакомого движения."
+    return text, feedback_kb()
 
 
 def hard_confirm_text(extra_days: int) -> str:
@@ -279,58 +203,56 @@ def hard_confirm_text(extra_days: int) -> str:
 def gentle_miss_text() -> str:
     return (
         "Ничего страшного, отдых — тоже часть процесса 🌿 "
-        "Восстановим стрик завтра?"
+        "Завтра можно вернуться к одному знакомому действию."
     )
 
 
 # --------------------------------------------------------------------------- #
 # Воскресный отчёт
 # --------------------------------------------------------------------------- #
-def weekly_report_text(
-    logs: list[dict],
-    timezone: str,
-    day: int,
-) -> str:
-    """logs — записи daily_logs за последние 7 календарных дней (могут быть не все)."""
-    from collections import Counter
-
+def weekly_report_text(logs: list[dict], timezone: str, day: int,
+                       readings: list[dict] | None = None, end_date: str | None = None) -> str:
+    """Calendar report: unknown/legacy scales are never averaged with 0–3."""
+    end = date.fromisoformat(end_date) if end_date else planner.now(timezone).date()
+    window = [end + timedelta(days=-i) for i in range(6, -1, -1)]
     by_date = {row["date"]: row for row in logs}
-
-    today = planner.now(timezone).date()
-    window = [(today + timedelta(days=-i)) for i in range(6, -1, -1)]
-    iso_window = [d.isoformat() for d in window]
-    pain_series = [by_date.get(d, {}).get("pain") for d in iso_window]
-    pain_vals = [v for v in pain_series if v is not None]
-    ps = planner.stats(pain_vals)
-    done = len(pain_vals)
-
-    locs = Counter(
-        by_date[d].get("note") for d in iso_window
-        if by_date.get(d) and by_date[d].get("note")
-    )
-
-    lines = [
-        f"📊 *Отчёт за неделю* (день {day})",
-        f"Метрик сдано: {done}/7\n",
-        f"*Боль (0 — нет · 3 — сильно):* {planner.sparkline(pain_series)}",
-    ]
-    if ps["avg"] is not None:
-        lines.append(f"средний уровень {ps['avg']:.1f} · минимум {ps['min']} · максимум {ps['max']}")
-    if locs:
-        lines.append("\n*Где болело чаще:* " + ", ".join(f"{l} ×{c}" for l, c in locs.most_common()))
-
-    if done == 0:
-        lines.append("\nНа этой неделе метрик пока не было — начнём свежую неделю вместе? 🌱")
-    elif ps["avg"] is not None and ps["avg"] <= 1:
-        lines.append("\nБоль держится на низком уровне — отличный тренд, так держать! 📉")
-    else:
-        lines.append("\nТы собираешь данные и не бросаешь — это и есть главное. Двигаемся дальше 💪")
-
-    if day >= 30:
-        lines.append(
-            "\n🎯 *Ты прошёл месяц!* Фундамент Фазы 1 готов. Дальше — Фаза 2: "
-            "коррекция асимметрии и осанка. Готов?"
-        )
+    reading_dates = {row["date"] for row in readings or [] if row.get('status', 'done') == 'done'}
+    started_dates = {row['date'] for row in readings or [] if row.get('status') == 'partial'} - reading_dates
+    lines = [f"📊 *Неделя {window[0]:%d.%m.%Y} — {end:%d.%m.%Y}*",
+             "Боль: 0 — нет, 1 — слабая, 2 — умеренная, 3 — сильная.",
+             "— означает, что записи нет.\n"]
+    pain_series = []
+    completed = full = partial = legacy = 0
+    for current in window:
+        iso = current.isoformat()
+        row = by_date.get(iso, {})
+        complete = bool(row.get("evening_done"))
+        completed += complete
+        pain = row.get("pain")
+        valid = row.get("pain_scale") == 3 and pain in (0, 1, 2, 3)
+        if pain is not None and not valid:
+            legacy += 1
+        pain_series.append(pain if valid and complete else None)
+        pain_label = str(pain) if valid and complete else (f"{pain} (ранняя запись)" if pain is not None and not valid else "—")
+        status = row.get("habits_status")
+        full += complete and status == "yes"
+        partial += complete and status == "partial"
+        movement = {"yes": "да", "partial": "немного", "no": "нет"}.get(status, "—")
+        if status is None and row.get("habits_done"):
+            movement = "отмечено ранее"
+        if row.get("morning_done") and status is None:
+            movement = "утренний шаг"
+        reading = "✓" if iso in reading_dates else ("начато" if iso in started_dates else "—")
+        lines.append(f"{current:%d.%m} · боль {pain_label} · движение {movement} · чтение {reading}")
+    lines += [f"\nВечерних записей: {completed}/7.",
+              f"Движение по вечерним ответам: {full} полных, {partial} частичных.",
+              f"Дней с чтением: {len(reading_dates & {d.isoformat() for d in window})}/7."]
+    vals = [v for v in pain_series if v is not None]
+    if vals:
+        lines.append(f"Боль за неделю: {planner.sparkline(pain_series)} · средняя {sum(vals)/len(vals):.1f} из 3.")
+    if legacy:
+        lines.append("Ранние оценки показаны как записаны: их шкала неизвестна, в среднее они не входят.")
+    lines.append("\nВыбери одно действие, которое удобно повторить завтра. Пропуски не отменяют сделанного.")
     return "\n".join(lines)
 
 
@@ -348,7 +270,7 @@ def status_text(state: dict, telegraph_url: str | None) -> str:
         f"📍 *Статус*\n"
         f"День: {day}/30 · Неделя: {week}/4\n"
         f"Стадия: _{stage_name}_\n"
-        f"🔥 Стрик: {state['streak']} {_plural_days(state['streak'])}\n"
+        f"📅 Вечерних отметок подряд: {state['streak']} {_plural_days(state['streak'])}\n"
         f"⏸ Пауза: {paused}{extra_line}\n"
         f"📅 Последняя отметка: {state['last_log_date'] or '—'}"
     )
@@ -356,13 +278,13 @@ def status_text(state: dict, telegraph_url: str | None) -> str:
 
 def welcome_text() -> str:
     return (
-        "👋 Привет! Я твой ассистент по реабилитации спины.\n\n"
-        "Каждое утро буду приносить порцию теории и утренний запуск, днём — "
-        "напоминать про микро-паузы, а вечером — собирать метрики (боль и "
-        "жёсткость правой стороны) и поддерживать мотивацию на базе науки.\n\n"
-        "Без давления: пропустил день — не страшно, восстановим.\n\n"
-        "Команды: /status — где я сейчас · /report — недельный отчёт · "
-        "/chat <текст> — поговорить с ИИ · /pause /resume · /reset — начать заново."
+        "Привет! Здесь можно постепенно вернуть движение в обычный день.\n\n"
+        "Утром — короткая история о теле и одно действие. Урок читается прямо в чате, "
+        "после него можно посмотреть видео. Вечером — запись о самочувствии и о том, что получилось.\n\n"
+        "/today — начать сегодня · /theory — читать · /lessons — все темы\n"
+        "/report — неделя в датах · /report 2026-09-01 — неделя до указанной даты\n"
+        "/goto 3 — открыть прошлый урок · /continue 3 — продолжить программу с дня 3\n"
+        "/pause и /resume — управление напоминаниями."
     )
 
 

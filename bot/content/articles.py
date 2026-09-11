@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 _ARTICLES_DIR = Path(__file__).parent.parent.parent / "data" / "articles"
@@ -23,6 +24,10 @@ def _load_all() -> list[dict]:
 
 
 ARTICLES = _load_all()
+
+
+def article_digest(article: dict) -> str:
+    return hashlib.sha256(json.dumps(article, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
 
 def get_article(day: int) -> dict | None:
