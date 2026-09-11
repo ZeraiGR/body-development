@@ -107,14 +107,14 @@ async def update_streak(state: dict, timezone: str) -> tuple[int, bool]:
 # Утилиты для отчётов
 # --------------------------------------------------------------------------- #
 def sparkline(values: list[int | None]) -> str:
-    """Мини-график из значений 1..10 (None → пробел)."""
+    """Мини-график боли 0..3 (None → точка)."""
     blocks = "▁▂▃▄▅▆▇█"
     out = []
     for v in values:
         if v is None:
             out.append("·")
         else:
-            idx = max(0, min(len(blocks) - 1, round((v - 1) / 9 * (len(blocks) - 1))))
+            idx = max(0, min(len(blocks) - 1, round(v / 3 * (len(blocks) - 1))))
             out.append(blocks[idx])
     return "".join(out)
 

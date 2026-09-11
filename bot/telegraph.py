@@ -21,6 +21,14 @@ _PAGE_DELAY = 2.0  # сек между createPage — против FLOOD_WAIT
 _FLOOD = re.compile(r"FLOOD_WAIT_(\d+)")
 
 
+async def check_image_urls(session: aiohttp.ClientSession, articles: list[dict]) -> None:
+    """Do not publish pages with unpublished illustration URLs."""
+    for url in sorted({a['image']['url'] for a in articles if a.get('image')}):
+        async with session.head(url, timeout=aiohttp.ClientTimeout(total=20), allow_redirects=True) as response:
+            if response.status != 200 or not response.headers.get('Content-Type', '').startswith('image/'):
+                raise RuntimeError(f'Иллюстрация недоступна: {url}. Сначала опубликуй assets/images/v2 в main.')
+
+
 async def create_account(
     session: aiohttp.ClientSession, short_name: str, author_name: str = DEFAULT_AUTHOR
 ) -> str:
@@ -202,6 +210,22 @@ def article_to_content(article: dict, quote: dict | None = None) -> list[dict]:
                 f"— Katy Bowman, Move Your DNA, стр. {quote['page']}"
             ]}]}
         )
+    if article.get('image'):
+        picture = article['image']
+        content.insert(0, {'tag': 'figure', 'children': [
+            {'tag': 'img', 'attrs': {'src': picture['url']}},
+            {'tag': 'figcaption', 'children': [picture['caption']]},
+        ]})
+    if article.get('video'):
+        video = article['video']
+        content.extend([
+            {'tag': 'h3', 'children': ['Посмотреть по теме']},
+            {'tag': 'p', 'children': [{'tag': 'a', 'attrs': {'href': video['url']}, 'children': [video['title']]}]},
+            {'tag': 'p', 'children': [video['author'] + ' · ' + video['language']]},
+            {'tag': 'p', 'children': [video['why']]},
+            {'tag': 'h3', 'children': ['Попробовать сегодня']},
+            {'tag': 'p', 'children': [article['action']]},
+        ])
     return content
 
 

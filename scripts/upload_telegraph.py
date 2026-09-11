@@ -4,7 +4,7 @@
     .venv/bin/python scripts/upload_telegraph.py
 
 Особенности:
-  - резюме: дни, уже загруженные в БД, пропускаются (можно перезапускать);
+  - пропускает страницы, хеш которых совпадает с текущим содержимым;
   - ссылки сохраняются в БД сразу после каждой статьи (прогресс не теряется);
   - токен аккаунта Telegraph сохраняется в .env (TELEGRAPH_TOKEN), чтобы
     повторные запуски не плодили аккаунты;
@@ -34,6 +34,7 @@ from bot.telegraph import (  # noqa: E402
     article_to_content,
     create_account,
     create_page,
+    check_image_urls,
 )
 
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
@@ -58,6 +59,7 @@ async def main() -> None:
     token = config.telegraph_token
     try:
         async with aiohttp.ClientSession() as session:
+            await check_image_urls(session, ARTICLES)
             if not token:
                 token = await create_account(session, "BackRehabBot")
                 save_token_to_env(token)

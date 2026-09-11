@@ -17,8 +17,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from config import config
-from bot import db, llm, llm_context, messages, planner
-from bot.bridge import settle
+from bot import journey, db, llm, llm_context, messages, planner
+from bot.bridge import settle, refresh_morning
 
 router = Router()
 
@@ -26,24 +26,6 @@ router = Router()
 # --------------------------------------------------------------------------- #
 # Утилиты разбора колбэков (строгие)
 # --------------------------------------------------------------------------- #
-def parse_rating(data: str, prefix: str) -> int | None:
-    """'pain:7' -> 7. Неизвестный формат / выход за 1..10 -> None."""
-    if not data.startswith(f"{prefix}:"):
-        return None
-    raw = data.split(":", 1)[1]
-    if not raw.isdigit():
-        return None
-    value = int(raw)
-    return value if 1 <= value <= 10 else None
-
-
-async def _send_weekly(message_or_cb) -> None:
-    tz = config.schedule.timezone
-    state = await db.get_state()
-    logs = await db.logs_between(planner.date_iso(-6, tz), planner.today_iso(tz))
-    await message_or_cb.message.answer(  # type: ignore[attr-defined]
-        messages.weekly_report_text(logs, tz, state["current_day"])
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +51,8 @@ async def cmd_help(message: Message) -> None:
         "/resume — снять паузу\n"
         "/next — перескочить на следующий день (dev)\n"
         "/hard — задержаться на текущей неделе ещё на 2 дня\n"
-        "/goto N — перейти на любой день (1–30), если отстал/забежал вперёд\n"
+        "/goto N — открыть прошлый урок без сдвига программы\n"
+        "/lessons — все темы и прочитанное · /continue N — продолжить с дня N\n"
         "/mute — отключить рассылки в этом мессенджере · /unmute — вернуть\n"
         "/reset — начать программу заново с дня 1"
     )
@@ -84,7 +67,8 @@ async def cmd_status(message: Message) -> None:
 
 @router.message(Command("report"))
 async def cmd_report(message: Message) -> None:
-    await _send_weekly(message)
+    args = (message.text or "").split(maxsplit=1)
+    await message.answer(await journey.report(args[1].strip() if len(args) > 1 else ""))
 
 
 @router.message(Command("pause"))
@@ -109,20 +93,21 @@ async def cmd_next(message: Message) -> None:
 
 @router.message(Command("goto"))
 async def cmd_goto(message: Message) -> None:
-    """Перейти на любой день: /goto N (1..30). Не двигает стрик/метрики — только курсор дня."""
-    parts = (message.text or "").split()
-    if len(parts) < 2 or not parts[1].strip().isdigit():
-        await message.answer("Напиши: /goto N, где N — номер дня (1–30). Например /goto 3.")
-        return
-    day = max(1, min(30, int(parts[1].strip())))
-    await db.update_state(current_day=day)
-    state = await db.get_state()
-    url = await db.get_telegraph_link(day)
-    await message.answer(
-        f"📍 Переключился на день {day} · неделя {program.week_for_day(day)}.\n"
-        f"Дальше курс продолжается отсюда вперёд. /today — утреннее сообщение этого дня."
-        + (f"\n🔗 Теория: {url}" if url else "")
-    )
+    parts = (message.text or "").split(maxsplit=1)
+    text, kb = await journey.lesson(parts[1].strip() if len(parts) > 1 else "")
+    await message.answer(text, reply_markup=kb)
+
+
+@router.message(Command("continue"))
+async def cmd_continue(message: Message) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    await message.answer(await journey.continue_from(parts[1].strip() if len(parts) > 1 else ""))
+
+
+@router.message(Command("lessons"))
+async def cmd_lessons(message: Message) -> None:
+    text, kb = await journey.lesson_list()
+    await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("hard"))
@@ -134,15 +119,7 @@ async def cmd_hard(message: Message) -> None:
 
 @router.message(Command("reset"))
 async def cmd_reset(message: Message) -> None:
-    await db.update_state(
-        current_day=1,
-        week_extra_days=0,
-        last_morning_date=None,
-        last_log_date=None,
-        streak=0,
-        paused=0,
-    )
-    await message.answer("🔄 Сброс. Снова День 1, Неделя 1. Поехали заново 🌱")
+    await message.answer(await journey.reset())
 
 
 @router.message(Command("mute"))
@@ -225,26 +202,15 @@ async def cmd_today(message: Message) -> None:
 
 @router.message(Command("theory", "day"))
 async def cmd_theory(message: Message) -> None:
-    """Открыть теорию любого дня: /theory N (алиас /day N). Без аргумента — текущий.
-    Счётчик дней НЕ двигает — это просто вызов теории."""
-    parts = (message.text or "").split()
-    day = None
-    if len(parts) >= 2 and parts[1].strip().isdigit():
-        d = int(parts[1].strip())
-        if 1 <= d <= 30:
-            day = d
-    if day is None:
-        day = (await db.get_state())["current_day"]
-    url = await db.get_telegraph_link(day)
-    text, kb = messages.theory_text(day, url)
+    parts = (message.text or "").split(maxsplit=1)
+    text, kb = await journey.lesson(parts[1].strip() if len(parts) > 1 else "")
     await message.answer(text, reply_markup=kb)
 
 
 @router.message(Command("evening"))
 async def cmd_evening(message: Message) -> None:
-    """Запустить вечерний опрос вручную."""
-    state = await db.get_state()
-    text, kb = messages.evening_intro_text(state["current_day"])
+    """Начать или продолжить вечернюю запись."""
+    text, kb = await journey.evening()
     await message.answer(text, reply_markup=kb)
 
 
@@ -275,22 +241,20 @@ async def _settle_cb(cb: CallbackQuery, toast: str) -> None:
         pass
 
 
-@router.callback_query(F.data == "morning:done")
-async def cb_morning_done(cb: CallbackQuery) -> None:
-    today = planner.today_iso(config.schedule.timezone)
-    already = bool((await db.get_log(today) or {}).get("morning_done"))
-    state = await db.get_state()
-    await db.upsert_log(today, state["current_day"], morning_done=True)
-    await _settle_cb(cb, "Уже отмечено ✅" if already else "Утренний запуск засчитан 🔥")
-    if not already:
-        await settle(today, "morning", "tg")
+@router.callback_query(F.data.startswith("learn:") | F.data.startswith("move:") | F.data.startswith("check:"))
+async def cb_journey(cb: CallbackQuery) -> None:
+    await cb.answer()
+    text, kb = await journey.action(cb.data or "")
+    if (cb.data or "").startswith("move:" + planner.today_iso(config.schedule.timezone) + ":") and (await db.get_log(planner.today_iso(config.schedule.timezone)) or {}).get("morning_done"):
+        await refresh_morning(planner.today_iso(config.schedule.timezone))
+    # Keep the source message so a reader can revisit the text and external links.
+    await cb.message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data == "morning:later")
-async def cb_morning_later(cb: CallbackQuery) -> None:
-    today = planner.today_iso(config.schedule.timezone)
-    await _settle_cb(cb, "Окей, без давления 🌿")
-    await settle(today, "morning", "tg")
+@router.callback_query((F.data == "morning:done") | (F.data == "morning:later") | (F.data == "theory:done") |
+                       F.data.startswith("pl:") | F.data.startswith("loc:") | F.data.startswith("habits:"))
+async def cb_legacy(cb: CallbackQuery) -> None:
+    await cb.answer("Старая кнопка. Открой /today, /theory или /evening.", show_alert=True)
 
 
 @router.callback_query(F.data == "ping:done")
@@ -305,81 +269,6 @@ async def cb_ping_skip(cb: CallbackQuery) -> None:
     today = planner.today_iso(config.schedule.timezone)
     await _settle_cb(cb, "Без проблем, в следующий раз 🙂")
     await settle(today, "ping", "tg")
-
-
-@router.callback_query(F.data == "theory:done")
-async def cb_theory_done(cb: CallbackQuery) -> None:
-    """«Прочитал» в /theory — убрать кнопку, сообщение оставить."""
-    await _settle_cb(cb, "Прочитано 📖")
-
-
-# --------------------------------------------------------------------------- #
-# Вечер: боль -> жёсткость -> привычки -> фидбек
-# --------------------------------------------------------------------------- #
-@router.callback_query(F.data.startswith("pl:"))
-async def cb_pain_level(cb: CallbackQuery) -> None:
-    """Уровень боли (0..3) → показать выбор локации."""
-    raw = cb.data.split(":", 1)[1]
-    if not raw.isdigit():
-        await cb.answer()
-        return
-    level = int(raw)
-    if not 0 <= level <= 3:
-        await cb.answer()
-        return
-    day = (await db.get_state())["current_day"]
-    await db.upsert_log(planner.today_iso(config.schedule.timezone), day, pain=level)
-    text, kb = messages.locations_prompt()
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("loc:"))
-async def cb_location(cb: CallbackQuery) -> None:
-    """Локация боли → показать привычки."""
-    loc = cb.data.split(":", 1)[1] if ":" in cb.data else ""
-    if loc not in messages._LOCATIONS:
-        await cb.answer()
-        return
-    day = (await db.get_state())["current_day"]
-    await db.upsert_log(planner.today_iso(config.schedule.timezone), day, note=loc)
-    text, kb = messages.habits_prompt()
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("habits:"))
-async def cb_habits(cb: CallbackQuery) -> None:
-    code = cb.data.split(":", 1)[1] if ":" in cb.data else ""
-    if code not in ("yes", "partial", "no"):
-        await cb.answer()
-        return
-    habits_done = code in ("yes", "partial")
-
-    tz = config.schedule.timezone
-    today = planner.today_iso(tz)
-    state = await db.get_state()
-    day = state["current_day"]
-
-    today_log = await db.get_log(today) or {}
-    pain_level = today_log.get("pain")
-    location = today_log.get("note")
-
-    await db.upsert_log(today, day, habits_done=habits_done, evening_done=True)
-
-    new_streak, changed = await planner.update_streak(state, tz)
-    if changed:
-        await db.update_state(streak=new_streak, last_log_date=today)
-
-    if pain_level is None:
-        # Пользователь нажал вне порядка — не падаем, просто благодарим.
-        await cb.message.edit_text("Засчитал вечер ✅ Завтра снова соберём метрики.")
-        await cb.answer()
-        return
-
-    text, kb = messages.feedback_text(day, pain_level, location, new_streak)
-    await cb.message.edit_text(text, reply_markup=kb)
-    await cb.answer()
 
 
 @router.callback_query(F.data == "hard")
@@ -422,7 +311,7 @@ async def cmd_chat(message: Message) -> None:
     if not user_text:
         await message.answer(
             "Напиши так: /chat <твоё сообщение>.\n"
-            "Например: /chat спина сегодня снова каменная после долгой катки"
+            "Например: /chat спина сегодня снова каменная после рабочего дня"
         )
         return
     await _llm_chat(message, user_text)

@@ -22,8 +22,8 @@ import re
 import aiohttp
 from aiogram.types import InlineKeyboardMarkup
 
-from bot import db, llm, llm_context, messages, planner
-from bot.bridge import settle
+from bot import journey, db, llm, llm_context, messages, planner
+from bot.bridge import settle, refresh_morning
 
 log = logging.getLogger(__name__)
 
@@ -252,7 +252,7 @@ class VKBot:
             "start": lambda: self._reply(messages.welcome_text()),
             "help": lambda: self._reply(self._help_text()),
             "status": self._cmd_status,
-            "report": self._cmd_report,
+            "report": lambda: self._cmd_report(args),
             "pause": self._cmd_pause,
             "resume": self._cmd_resume,
             "next": self._cmd_next,
@@ -266,6 +266,8 @@ class VKBot:
             "remember": self._cmd_remember,
             "mute": self._cmd_mute,
             "unmute": self._cmd_unmute,
+            "lessons": self._cmd_lessons,
+            "continue": lambda: self._cmd_continue(args),
             "goto": lambda: self._cmd_goto(args),
         }
         if name in handlers:
@@ -283,11 +285,11 @@ class VKBot:
             "/today — утреннее сообщение дня вручную\n"
             "/evening — запустить вечерний опрос\n"
             "/ping — дневной микро-пинг\n"
-            "/report — недельный отчёт\n"
+            "/report [ГГГГ-ММ-ДД] — неделя до выбранной даты\n"
             "/chat <текст> — поговорить с ИИ (или просто напиши текст)\n"
             "/remember — обновить память ИИ\n"
             "/pause · /resume · /next · /hard · /reset — управление программой\n"
-            "/goto N — перейти на любой день (1–30)\n"
+            "/goto N — открыть урок · /continue N — продолжить с дня N · /lessons — все темы\n"
             "/theory N — теория дня N (без N — текущий)"
         )
 
@@ -300,11 +302,8 @@ class VKBot:
         url = await db.get_telegraph_link(state["current_day"])
         await self._reply(messages.status_text(state, url))
 
-    async def _cmd_report(self) -> None:
-        tz = config_schedule_tz()
-        state = await db.get_state()
-        logs = await db.logs_between(planner.date_iso(-6, tz), planner.today_iso(tz))
-        await self._reply(messages.weekly_report_text(logs, tz, state["current_day"]))
+    async def _cmd_report(self, args: str = "") -> None:
+        await self._reply(await journey.report(args))
 
     async def _cmd_pause(self) -> None:
         await db.update_state(paused=1)
@@ -326,11 +325,7 @@ class VKBot:
         await self._reply(messages.hard_confirm_text(extra))
 
     async def _cmd_reset(self) -> None:
-        await db.update_state(
-            current_day=1, week_extra_days=0, last_morning_date=None,
-            last_log_date=None, streak=0, paused=0,
-        )
-        await self._reply("🔄 Сброс. Снова День 1, Неделя 1. Поехали заново 🌱")
+        await self._reply(await journey.reset())
 
     async def _cmd_today(self) -> None:
         state = await db.get_state()
@@ -340,29 +335,21 @@ class VKBot:
         await self._reply(text, kb)
 
     async def _cmd_theory(self, args: str) -> None:
-        day = None
-        if args.strip().isdigit():
-            d = int(args.strip())
-            if 1 <= d <= 30:
-                day = d
-        if day is None:
-            day = (await db.get_state())["current_day"]
-        url = await db.get_telegraph_link(day)
-        text, kb = messages.theory_text(day, url)
+        text, kb = await journey.lesson(args.strip())
         await self._reply(text, kb)
 
     async def _cmd_goto(self, args: str) -> None:
-        if not args.strip().isdigit():
-            await self._reply("Напиши: /goto N (1–30). Например /goto 3.")
-            return
-        day = max(1, min(30, int(args.strip())))
-        await db.update_state(current_day=day)
-        url = await db.get_telegraph_link(day)
-        await self._reply(f"📍 Переключился на день {day}. /today — утреннее сообщение." + (f"\n🔗 {url}" if url else ""))
+        await self._cmd_theory(args)
+
+    async def _cmd_lessons(self) -> None:
+        text, kb = await journey.lesson_list()
+        await self._reply(text, kb)
+
+    async def _cmd_continue(self, args: str) -> None:
+        await self._reply(await journey.continue_from(args.strip()))
 
     async def _cmd_evening(self) -> None:
-        state = await db.get_state()
-        text, kb = messages.evening_intro_text(state["current_day"])
+        text, kb = await journey.evening()
         await self._reply(text, kb)
 
     async def _cmd_ping(self) -> None:
@@ -412,18 +399,18 @@ class VKBot:
         async def toast(t: str) -> None:
             await self._answer_event(event_id, user_id, peer_id, t)
 
-        if data == "morning:done":
-            today = planner.today_iso(config_schedule_tz())
-            state = await db.get_state()
-            await db.upsert_log(today, state["current_day"], morning_done=True)
-            await self._edit(peer_id, cmid, None, None)  # снять кнопки, текст оставить
-            await toast("Утренний запуск засчитан 🔥")
-            await settle(today, "morning", "vk")
-        elif data == "morning:later":
-            await self._edit(peer_id, cmid, None, None)
-            await toast("Окей, без давления 🌿")
-            await settle(planner.today_iso(config_schedule_tz()), "morning", "vk")
-        elif data == "ping:done":
+        if data.startswith(("learn:", "move:", "check:")):
+            await toast("")
+            text, kb = await journey.action(data)
+            if data.startswith("move:" + planner.today_iso(config_schedule_tz()) + ":") and (await db.get_log(planner.today_iso(config_schedule_tz())) or {}).get("morning_done"):
+                await refresh_morning(planner.today_iso(config_schedule_tz()))
+            await self._reply(text, kb)
+            return
+        if data in ("morning:done", "morning:later", "theory:done") or data.startswith(("pl:", "loc:", "habits:")):
+            await toast("Старая кнопка. Открой /today, /theory или /evening.")
+            return
+
+        if data == "ping:done":
             await self._edit(peer_id, cmid, None, None)
             await toast("👍 Красава, тело скажет спасибо")
             await settle(planner.today_iso(config_schedule_tz()), "ping", "vk")
@@ -431,72 +418,12 @@ class VKBot:
             await self._edit(peer_id, cmid, None, None)
             await toast("Без проблем, в следующий раз 🙂")
             await settle(planner.today_iso(config_schedule_tz()), "ping", "vk")
-        elif data == "theory:done":
-            await self._edit(peer_id, cmid, None, None)
-            await toast("Прочитано 📖")
         elif data == "hard":
             extra = 2
             await db.update_state(week_extra_days=extra)
             await self._reply(messages.hard_confirm_text(extra))
             await self._edit(peer_id, cmid, None, None)
             await toast("Задерживаемся 🌿")
-        elif data.startswith("pl:"):
-            raw = data.split(":", 1)[1]
-            if not (raw.isdigit() and 0 <= int(raw) <= 3):
-                await toast("")
-                return
-            day = (await db.get_state())["current_day"]
-            await db.upsert_log(planner.today_iso(config_schedule_tz()), day, pain=int(raw))
-            text, kb = messages.locations_prompt()
-            await self._edit(peer_id, cmid, text, kb)
-            await toast("")
-        elif data.startswith("loc:"):
-            loc = data.split(":", 1)[1] if ":" in data else ""
-            if loc not in messages._LOCATIONS:
-                await toast("")
-                return
-            day = (await db.get_state())["current_day"]
-            await db.upsert_log(planner.today_iso(config_schedule_tz()), day, note=loc)
-            text, kb = messages.habits_prompt()
-            await self._edit(peer_id, cmid, text, kb)
-            await toast("")
-        elif data.startswith("habits:"):
-            await self._handle_habits(data, peer_id, cmid, toast)
-
-    async def _handle_habits(self, data: str, peer_id: int, cmid: int, toast) -> None:
-        """Зеркало cb_habits: финал вечернего опроса (привычки → фидбек + стрик)."""
-        code = data.split(":", 1)[1] if ":" in data else ""
-        if code not in ("yes", "partial", "no"):
-            await toast("")
-            return
-        habits_done = code in ("yes", "partial")
-        tz = config_schedule_tz()
-        today = planner.today_iso(tz)
-        state = await db.get_state()
-        day = state["current_day"]
-        today_log = await db.get_log(today) or {}
-        pain_level = today_log.get("pain")
-        location = today_log.get("note")
-        await db.upsert_log(today, day, habits_done=habits_done, evening_done=True)
-        new_streak, changed = await planner.update_streak(state, tz)
-        if changed:
-            await db.update_state(streak=new_streak, last_log_date=today)
-        if pain_level is None:
-            await self._edit(peer_id, cmid, "Засчитал вечер ✅ Завтра снова соберём метрики.", None)
-        else:
-            text, kb = messages.feedback_text(day, pain_level, location, new_streak)
-            await self._edit(peer_id, cmid, text, kb)
-        await toast("")
-
-
-def _parse_rating(data: str, prefix: str) -> int | None:
-    if not data.startswith(f"{prefix}:"):
-        return None
-    raw = data.split(":", 1)[1]
-    if not raw.isdigit():
-        return None
-    value = int(raw)
-    return value if 1 <= value <= 10 else None
 
 
 def config_schedule_tz() -> str:
