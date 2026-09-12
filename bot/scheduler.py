@@ -136,10 +136,7 @@ class BotScheduler:
             state = await db.get_state()
             if state["paused"]:
                 return  # пауза — ни перевода дня, ни сообщения
-            updates = await planner.morning_rollover(state, config.schedule.timezone)
-            if updates:
-                await db.update_state(**updates)
-                state.update(updates)
+            state = await db.rollover_program(config.schedule.timezone)
             if await db.was_sent(today, "morning"):
                 if planner.is_sunday(config.schedule.timezone):
                     await self._send_weekly(state['current_day'])
@@ -148,6 +145,7 @@ class BotScheduler:
             day = state["current_day"]
             url = await db.get_telegraph_link(day)
             text, kb = messages.morning_text(day, url)
+            text += "\n\n" + await journey.progress()
             ids = await self._send(text, kb)
             await self._save_refs(today, "morning", ids, text)
             await db.mark_sent(today, "morning")

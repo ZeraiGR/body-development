@@ -33,6 +33,8 @@ async def continue_from(raw: str) -> str:
     if day is None:
         return 'Укажи: /continue N, где N от 1 до 30.'
     async with _lock:
+        if day > (await db.get_state())['current_day']:
+            return 'Вперёд без завершения дня перейти нельзя.\n\n' + await progress()
         await db.continue_program(day, planner.today_iso(config.schedule.timezone))
     return f'Продолжаем программу с дня {day}. /today — открыть. История чтения и записей сохранена.'
 
@@ -107,7 +109,7 @@ async def _saved(draft):
     kb.button(text='Изменить ответы', callback_data=f"check:{draft['date']}:{draft['day']}:{draft['token']}:edit:start")
     kb.button(text='Читать урок', callback_data=f"learn:open:{draft['day']}")
     kb.adjust(1)
-    return text, kb.as_markup()
+    return text + '\n\n' + await progress(), kb.as_markup()
 
 
 def _question(draft):
@@ -171,12 +173,19 @@ async def _action(data: str):
                     f"*Теперь попробуй:* {article['action']}"), kb.as_markup()
     if parts[0] == 'move' and len(parts) == 3:
         day = day_argument(parts[2])
-        if parts[1] != today or day is None:
+        if parts[1] != today or day is None or day != (await db.get_state())['current_day']:
             return 'Эта отметка относится к другому дню. /today — открыть сегодняшний шаг.', None
         already = bool((await db.get_log(today) or {}).get('morning_done'))
         await db.upsert_log(today, (await db.get_state())['current_day'], morning_done=True)
         text, kb = await lesson(str(day))
         return ('✓ Движение уже отмечено.' if already else '✓ Движение за сегодня отмечено.') + '\n\n' + text, kb
+    if parts[0] == 'pausemove' and len(parts) == 3:
+        if parts[1] != today or parts[2] not in ('done', 'skip'):
+            return 'Старая кнопка. /ping — открыть сегодняшнюю паузу.', None
+        state = await db.get_state()
+        await db.upsert_log(today, state['current_day'], ping_done=parts[2] == 'done')
+        return ('✓ Дневная пауза выполнена.' if parts[2] == 'done' else
+                'Пауза пропущена. Когда получится — открой /ping и отметь выполнение.'), None
     if parts[0] == 'check' and len(parts) == 6:
         recorded_date, day, token, step, value = parts[1], day_argument(parts[2]), parts[3], parts[4], parts[5]
         draft = await db.get_checkin(today)
@@ -191,3 +200,36 @@ async def _action(data: str):
         draft = await db.get_checkin(today)
         return await _saved(draft) if draft['step'] == 'done' else _question(draft)
     raise ValueError
+
+
+async def progress() -> str:
+    state = await db.get_state()
+    today = planner.today_iso(config.schedule.timezone)
+    checklist = await db.day_checklist(state, today)
+    done = all(checklist.values()) or await db.completed_program_day(state, today)
+    if done:
+        if state['current_day'] == 30:
+            return '✓ День 30 завершён. Все дни программы пройдены.'
+        if state['paused']:
+            return '✓ День завершён. Переход утром после /resume.'
+        if state['week_extra_days']:
+            return '✓ День завершён. Переход утром после установленной задержки.'
+        return '✓ День завершён. Следующий откроется утром.'
+    return ('Чтобы завершить день ' + str(state['current_day']) + ':\n' +
+            '\n'.join(('✓ ' if value else '○ ') + label for label, value in checklist.items()) +
+            '\nЕсли что-то не выполнено, завтра повторим этот день.')
+
+
+async def status() -> str:
+    state = await db.get_state()
+    return messages.status_text(state, await db.get_telegraph_link(state['current_day'])) + '\n\n' + await progress()
+
+
+async def today():
+    state = await db.get_state()
+    text, kb = messages.morning_text(state['current_day'], await db.get_telegraph_link(state['current_day']))
+    return text + '\n\n' + await progress(), kb
+
+
+async def next_day() -> str:
+    return await progress()

@@ -44,8 +44,8 @@ def _plural_days(n: int) -> str:
 
 def ping_kb() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="✅ Сделал", callback_data="ping:done")
-    kb.button(text="⏩ Пропустить", callback_data="ping:skip")
+    kb.button(text="✅ Сделал", callback_data=f"pausemove:{planner.today_iso(config.schedule.timezone)}:done")
+    kb.button(text="⏩ Пропустить", callback_data=f"pausemove:{planner.today_iso(config.schedule.timezone)}:skip")
     kb.adjust(2)
     return kb.as_markup()
 
@@ -281,9 +281,10 @@ def welcome_text() -> str:
         "Привет! Здесь можно постепенно вернуть движение в обычный день.\n\n"
         "Утром — короткая история о теле и одно действие. Урок читается прямо в чате, "
         "после него можно посмотреть видео. Вечером — запись о самочувствии и о том, что получилось.\n\n"
+        "Следующий день открывается утром после всех отметок текущего. /status — что осталось.\n\n"
         "/today — начать сегодня · /theory — читать · /lessons — все темы\n"
         "/report — неделя в датах · /report 2026-09-01 — неделя до указанной даты\n"
-        "/goto 3 — открыть прошлый урок · /continue 3 — продолжить программу с дня 3\n"
+        "/goto 3 — открыть прошлый урок · /continue 3 — вернуться к уже открытому дню 3\n"
         "/pause и /resume — управление напоминаниями."
     )
 

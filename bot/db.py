@@ -144,10 +144,11 @@ async def init_db(db_path: str) -> None:
     )
     # Additive migration: keep all existing dates, readings and measurements.
     columns = {r[1] for r in await (await _db.execute("PRAGMA table_info(daily_logs)")).fetchall()}
-    for name, definition in (("habits_status", "TEXT"), ("pain_scale", "INTEGER")):
+    for name, definition in (("habits_status", "TEXT"), ("pain_scale", "INTEGER"), ("ping_done", "INTEGER NOT NULL DEFAULT 0")):
         if name not in columns:
             await _db.execute(f"ALTER TABLE daily_logs ADD COLUMN {name} {definition}")
     for table, additions in (
+        ("user_state", (("day_started_date", "TEXT"),)),
         ("reading_events", (("status", "TEXT NOT NULL DEFAULT 'done'"),)),
         ("checkin_drafts", (("movement", "TEXT"), ("token", "TEXT"))),
         ("telegraph_links", (("content_hash", "TEXT"),)),
@@ -218,6 +219,7 @@ async def upsert_log(
     habits_done: bool | None = None,
     note: str | None = None,
     habits_status: str | None = None,
+    ping_done: bool | None = None,
     pain_scale: int | None = None,
 ) -> None:
     """Создать запись дня (если нет) и обновить только переданные поля."""
@@ -241,6 +243,8 @@ async def upsert_log(
         updates["habits_done"] = int(habits_done)
     if note is not None:
         updates["note"] = note
+    if ping_done is not None:
+        updates["ping_done"] = int(ping_done)
     if habits_status is not None:
         updates["habits_status"] = habits_status
     if pain_scale is not None:
@@ -345,7 +349,7 @@ async def answer_checkin(date: str, token: str, step: str, value: str, yesterday
 
 @_writer
 async def continue_program(day: int, today: str) -> None:
-    await _conn().execute("UPDATE user_state SET current_day=?, week_extra_days=0, last_morning_date=? WHERE id=1", (day, today))
+    await _conn().execute("UPDATE user_state SET current_day=?, week_extra_days=0, last_morning_date=?, day_started_date=? WHERE id=1", (day, today, today))
     await _conn().execute("DELETE FROM checkin_drafts WHERE date=?", (today,))
     await _conn().commit()
 
@@ -542,3 +546,55 @@ async def latest_photo(role: str) -> dict[str, Any] | None:
     )
     row = await cur.fetchone()
     return dict(row) if row else None
+
+
+async def completed_program_day(state: dict, before: str) -> bool:
+    """One fully completed calendar date since entering this lesson; ignore future rows."""
+    cur = await _conn().execute(
+        "SELECT 1 FROM daily_logs l WHERE l.day_number=? AND l.date>=? AND l.date<? "
+        "AND l.morning_done=1 AND l.ping_done=1 AND l.evening_done=1 AND l.habits_status='yes' "
+        "AND EXISTS (SELECT 1 FROM reading_events r WHERE r.day=l.day_number "
+        "AND r.status='done' AND r.date>=? AND r.date<=l.date) LIMIT 1",
+        (state['current_day'], state.get('day_started_date') or state['started_at'], before,
+         state.get('day_started_date') or state['started_at']))
+    return await cur.fetchone() is not None
+
+
+async def day_checklist(state: dict, today: str) -> dict[str, bool]:
+    log = await get_log(today) or {}
+    if log.get('day_number') != state['current_day']:
+        log = {}
+    reading = await reading_status(state['current_day'])
+    since = state.get('day_started_date') or state['started_at']
+    return {'утреннее движение — /today': bool(log.get('morning_done')),
+            'дневная пауза — /ping': bool(log.get('ping_done')),
+            'урок дочитан — /theory': bool(reading['read_at'] and since <= reading['read_at'] <= today),
+            'движение выполнено полностью — /evening': log.get('habits_status') == 'yes',
+            'вечерний опрос закончен — /evening': bool(log.get('evening_done'))}
+
+
+@_writer
+async def rollover_program(timezone: str) -> dict:
+    """Serialize completion check and day change with check-in writes."""
+    from bot import planner
+    state = await get_state()
+    updates = await planner.morning_rollover(state, timezone)
+    if updates:
+        columns = ', '.join(f'{k}=?' for k in updates)
+        await _conn().execute(f'UPDATE user_state SET {columns} WHERE id=1', tuple(updates.values()))
+        await _conn().commit()
+        state.update(updates)
+    return state
+
+
+@_writer
+async def reset_all_progress(today: str) -> None:
+    """Owner-authorized full reset; keep channel bindings, content and delivery deduplication."""
+    for table in ('daily_logs', 'reading_progress', 'reading_events', 'checkin_drafts',
+                  'llm_memory', 'llm_turns', 'msg_refs', 'photos'):
+        await _conn().execute(f'DELETE FROM {table}')
+    await _conn().execute(
+        'UPDATE user_state SET current_day=1, streak=0, paused=0, week_extra_days=0, '
+        'last_morning_date=?, last_log_date=NULL, started_at=?, day_started_date=? WHERE id=1',
+        (today, today, today))
+    await _conn().commit()

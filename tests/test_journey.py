@@ -80,6 +80,7 @@ class JourneyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await db.readings_between(TODAY, TODAY))[0]['status'], 'done')
 
     async def test_continue_is_explicit_preserves_history_and_pins_this_morning(self):
+        await db.update_state(current_day=9)
         await db.mark_read(2, TODAY)
         _, kb = await journey.evening()
         old_button = choice(kb, '2')
@@ -286,6 +287,120 @@ class JourneyTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(len(kb.inline_keyboard), 6)
             days.extend(int(c.split(':')[2]) for c in callbacks(kb) if c.startswith('learn:card:'))
         self.assertEqual(days, list(range(1, 31)))
+
+
+    async def completed_day(self, day=1):
+        await db.update_state(current_day=day, started_at=TODAY, day_started_date=TODAY, last_morning_date=TODAY)
+        await journey.action(f'move:{TODAY}:{day}')
+        await journey.action(f'pausemove:{TODAY}:done')
+        await self.finish(pain='3', movement='yes', reading='yes')
+
+    def morning(self, day=12):
+        return patch('bot.planner.now', return_value=datetime(2026, 9, day, 8, 30, tzinfo=ZoneInfo('Europe/Moscow')))
+
+    async def test_complete_day_unlocks_once_next_morning_even_with_pain(self):
+        await self.completed_day()
+        self.assertIn('Следующий откроется утром', await journey.next_day())
+        self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 1)
+        with self.morning():
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 2)
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 2)
+        with self.morning(13):
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 2)
+
+    async def test_each_required_mark_blocks_rollover_when_missing(self):
+        for field, value in [('morning_done', 0), ('ping_done', 0), ('evening_done', 0), ('habits_status', 'partial'), ('habits_status', 'no')]:
+            with self.subTest(field=field, value=value):
+                await db.reset_all_progress(TODAY)
+                await self.completed_day()
+                await db.upsert_log(TODAY, 1, **{field: value})
+                with self.morning():
+                    self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 1)
+
+    async def test_reading_partial_or_another_lesson_does_not_unlock(self):
+        await db.update_state(started_at=TODAY, last_morning_date=TODAY)
+        await journey.action(f'move:{TODAY}:1')
+        await journey.action(f'pausemove:{TODAY}:done')
+        await self.finish(movement='yes', reading='partial')
+        await db.mark_read(2, TODAY)
+        with self.morning():
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 1)
+
+    async def test_completed_day_survives_restart_and_missed_mornings(self):
+        await self.completed_day()
+        await db.close_db()
+        await db.init_db(self.path)
+        with self.morning(15):
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 2)
+
+    async def test_first_start_no_activity_pause_delay_and_final_day(self):
+        await db.update_state(started_at=TODAY)
+        self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 1)
+        with self.morning(15):
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 1)
+        await self.completed_day()
+        await db.update_state(paused=1)
+        with self.morning():
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['last_morning_date'], TODAY)
+        await db.update_state(paused=0, week_extra_days=1)
+        with self.morning():
+            st = await db.rollover_program('Europe/Moscow')
+            self.assertEqual((st['current_day'], st['week_extra_days']), (1, 0))
+        with self.morning(13):
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 2)
+        await db.reset_all_progress(TODAY)
+        await self.completed_day(30)
+        with self.morning():
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 30)
+            self.assertIn('Все дни программы пройдены', await journey.progress())
+
+    async def test_commands_cannot_skip_and_old_lesson_move_is_rejected(self):
+        await db.update_state(started_at=TODAY)
+        self.assertIn('нельзя', await journey.continue_from('9'))
+        await journey.next_day()
+        await journey.action(f'move:{TODAY}:9')
+        self.assertEqual((await db.get_state())['current_day'], 1)
+        self.assertIsNone(await db.get_log(TODAY))
+        self.assertIn('○ дневная пауза', await journey.status())
+
+    async def test_returning_to_lesson_does_not_reuse_older_completion(self):
+        await self.completed_day()
+        with self.morning():
+            await db.rollover_program('Europe/Moscow')
+            await journey.continue_from('1')
+        with self.morning(13):
+            self.assertEqual((await db.rollover_program('Europe/Moscow'))['current_day'], 1)
+
+    async def test_full_reset_clears_progress_but_preserves_channels_and_delivery(self):
+        await self.completed_day()
+        await db.set_channel('tg', muted=False)
+        await db.mark_sent(TODAY, 'morning')
+        await db.add_turn('user', 'synthetic test')
+        await db.reset_all_progress(TODAY)
+        state = await db.get_state()
+        self.assertEqual((state['current_day'], state['streak'], state['last_log_date']), (1, 0, None))
+        for table in ('daily_logs', 'reading_progress', 'reading_events', 'checkin_drafts', 'llm_turns', 'llm_memory', 'photos', 'msg_refs'):
+            cur = await db._conn().execute(f'SELECT count(*) FROM {table}')
+            self.assertEqual((await cur.fetchone())[0], 0)
+        self.assertTrue(await db.was_sent(TODAY, 'morning'))
+        cur = await db._conn().execute('SELECT count(*) FROM channel_settings')
+        self.assertEqual((await cur.fetchone())[0], 1)
+        self.assertFalse(await db.completed_program_day(state, '2026-09-12'))
+
+    async def test_dated_pause_buttons_persist_across_channels_and_reject_old_date(self):
+        await journey.action('pausemove:2026-09-10:done')
+        self.assertIsNone(await db.get_log(TODAY))
+        msg = SimpleNamespace(answer=AsyncMock())
+        await handlers.cb_journey(SimpleNamespace(data=f'pausemove:{TODAY}:done', answer=AsyncMock(), message=msg))
+        self.assertEqual((await db.get_log(TODAY))['ping_done'], 1)
+        vk = VKBot('test', 42)
+        with patch.object(vk, '_reply', new_callable=AsyncMock), patch.object(vk, '_answer_event', new_callable=AsyncMock):
+            await vk._on_event(dict(peer_id=42, user_id=42, conversation_message_id=1, event_id='x', payload=json.dumps(f'pausemove:{TODAY}:skip')))
+        self.assertEqual((await db.get_log(TODAY))['ping_done'], 0)
+        mx = MaxBot('test'); mx.owner_chat_id = '42'
+        with patch.object(mx, '_reply', new_callable=AsyncMock), patch.object(mx, '_answer_cb', new_callable=AsyncMock):
+            await mx._on_callback(dict(callback_id='x', payload=f'pausemove:{TODAY}:done', user={'user_id': 42}, message={'recipient': {'chat_id': 42}}))
+        self.assertEqual((await db.get_log(TODAY))['ping_done'], 1)
 
 
 class ContentTests(unittest.TestCase):

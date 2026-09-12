@@ -58,8 +58,8 @@ async def morning_rollover(state: dict, timezone: str) -> dict:
     Логика:
       - если paused — ничего не делаем;
       - если утро уже запускалось сегодня (last_morning_date == today) — пропускаем;
-      - иначе: если это НЕ первое утро (last_morning_date задан) — переводим день
-        (с учётом «задержаться на неделе»), затем отмечаем last_morning_date.
+      - иначе переводим день только после полного завершения текущего;
+        учитываем задержку и отмечаем last_morning_date даже при повторении.
     """
     today = today_iso(timezone)
     if state["paused"]:
@@ -67,15 +67,16 @@ async def morning_rollover(state: dict, timezone: str) -> dict:
     if state["last_morning_date"] == today:
         return {}
 
+    from bot import db
     updates: dict = {}
-    # Переводим день, только если уже было хотя бы одно утро (иначе это старт — день 1).
+    # A missed calendar day never unlocks another lesson. A saved completion
+    # survives downtime; one morning can advance at most one lesson.
     if state["last_morning_date"] is not None:
         if state["week_extra_days"] > 0:
-            # Задерживаемся на текущей неделе: день не двигаем, сжигаем один «лишний» день.
             updates["week_extra_days"] = state["week_extra_days"] - 1
-        elif state["current_day"] < 30:
+        elif state["current_day"] < 30 and await db.completed_program_day(state, today):
             updates["current_day"] = state["current_day"] + 1
-        # current_day == 30 и лишних дней нет → программа завершена, держим на 30.
+            updates["day_started_date"] = today
 
     updates["last_morning_date"] = today
     return updates

@@ -293,7 +293,7 @@ class MaxBot:
             "/remember — обновить память ИИ\n"
             "/mute — отключить рассылки в этом мессенджере · /unmute — вернуть\n"
             "/pause · /resume · /next · /hard · /reset — программа\n"
-            "/goto N — открыть урок · /continue N — продолжить с дня N · /lessons — все темы"
+            "/goto N — открыть урок · /continue N — вернуться к уже открытому дню · /lessons — все темы"
         )
 
     async def _reply(self, cid: str, text: str, tg_kb: InlineKeyboardMarkup | None = None) -> None:
@@ -308,9 +308,7 @@ class MaxBot:
         await self._reply(cid, "🔔 Рассылки в MAX снова включены.")
 
     async def _cmd_status(self, cid: str) -> None:
-        st = await db.get_state()
-        url = await db.get_telegraph_link(st["current_day"])
-        await self._reply(cid, messages.status_text(st, url))
+        await self._reply(cid, await journey.status())
 
     async def _cmd_report(self, cid: str, args: str = "") -> None:
         await self._reply(cid, await journey.report(args))
@@ -324,10 +322,7 @@ class MaxBot:
         await self._reply(cid, "▶️ Снова в строю. 💪")
 
     async def _cmd_next(self, cid: str) -> None:
-        st = await db.get_state()
-        nd = min(st["current_day"] + 1, 30)
-        await db.update_state(current_day=nd, last_morning_date=planner.today_iso(_tz()))
-        await self._reply(cid, f"⏭ Перешёл на день {nd}.")
+        await self._reply(cid, await journey.next_day())
 
     async def _cmd_hard(self, cid: str) -> None:
         extra = 2
@@ -338,9 +333,7 @@ class MaxBot:
         await self._reply(cid, await journey.reset())
 
     async def _cmd_today(self, cid: str) -> None:
-        st = await db.get_state()
-        url = await db.get_telegraph_link(st["current_day"])
-        text, kb = messages.morning_text(st["current_day"], url)
+        text, kb = await journey.today()
         await self._reply(cid, text, kb)
 
     async def _cmd_theory(self, cid: str, args: str) -> None:
@@ -400,7 +393,7 @@ class MaxBot:
         async def notify(t: str) -> None:
             await self._answer_cb(cid, notification=t)
 
-        if data.startswith(("learn:", "move:", "check:")):
+        if data.startswith(("learn:", "move:", "check:", "pausemove:")):
             await self._answer_cb(cid, notification="")
             text, kb = await journey.action(data)
             if data.startswith("move:" + planner.today_iso(_tz()) + ":") and (await db.get_log(planner.today_iso(_tz())) or {}).get("morning_done"):
@@ -411,12 +404,8 @@ class MaxBot:
             await notify("Старая кнопка. Открой /today, /theory или /evening.")
             return
 
-        if data == "ping:done":
-            await self._answer_cb(cid, notification="👍 Красава", message={"attachments": []})
-            await settle(planner.today_iso(_tz()), "ping", "max")
-        elif data == "ping:skip":
-            await self._answer_cb(cid, notification="Без проблем 🙂", message={"attachments": []})
-            await settle(planner.today_iso(_tz()), "ping", "max")
+        if data in ("ping:done", "ping:skip"):
+            await notify("Старая кнопка. Открой /ping и отметь сегодняшнюю паузу.")
         elif data == "hard":
             extra = 2
             await db.update_state(week_extra_days=extra)

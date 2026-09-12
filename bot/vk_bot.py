@@ -289,7 +289,7 @@ class VKBot:
             "/chat <текст> — поговорить с ИИ (или просто напиши текст)\n"
             "/remember — обновить память ИИ\n"
             "/pause · /resume · /next · /hard · /reset — управление программой\n"
-            "/goto N — открыть урок · /continue N — продолжить с дня N · /lessons — все темы\n"
+            "/goto N — открыть урок · /continue N — вернуться к уже открытому дню · /lessons — все темы\n"
             "/theory N — теория дня N (без N — текущий)"
         )
 
@@ -298,9 +298,7 @@ class VKBot:
 
     # --- конкретные команды (зеркало handlers.py) ---
     async def _cmd_status(self) -> None:
-        state = await db.get_state()
-        url = await db.get_telegraph_link(state["current_day"])
-        await self._reply(messages.status_text(state, url))
+        await self._reply(await journey.status())
 
     async def _cmd_report(self, args: str = "") -> None:
         await self._reply(await journey.report(args))
@@ -314,10 +312,7 @@ class VKBot:
         await self._reply("▶️ Снова в строю. Продолжаем 💪")
 
     async def _cmd_next(self) -> None:
-        state = await db.get_state()
-        new_day = min(state["current_day"] + 1, 30)
-        await db.update_state(current_day=new_day, last_morning_date=planner.today_iso(config_schedule_tz()))
-        await self._reply(f"⏭ Перешёл на день {new_day}.")
+        await self._reply(await journey.next_day())
 
     async def _cmd_hard(self) -> None:
         extra = 2
@@ -328,10 +323,7 @@ class VKBot:
         await self._reply(await journey.reset())
 
     async def _cmd_today(self) -> None:
-        state = await db.get_state()
-        day = state["current_day"]
-        url = await db.get_telegraph_link(day)
-        text, kb = messages.morning_text(day, url)
+        text, kb = await journey.today()
         await self._reply(text, kb)
 
     async def _cmd_theory(self, args: str) -> None:
@@ -399,7 +391,7 @@ class VKBot:
         async def toast(t: str) -> None:
             await self._answer_event(event_id, user_id, peer_id, t)
 
-        if data.startswith(("learn:", "move:", "check:")):
+        if data.startswith(("learn:", "move:", "check:", "pausemove:")):
             await toast("")
             text, kb = await journey.action(data)
             if data.startswith("move:" + planner.today_iso(config_schedule_tz()) + ":") and (await db.get_log(planner.today_iso(config_schedule_tz())) or {}).get("morning_done"):
@@ -410,14 +402,8 @@ class VKBot:
             await toast("Старая кнопка. Открой /today, /theory или /evening.")
             return
 
-        if data == "ping:done":
-            await self._edit(peer_id, cmid, None, None)
-            await toast("👍 Красава, тело скажет спасибо")
-            await settle(planner.today_iso(config_schedule_tz()), "ping", "vk")
-        elif data == "ping:skip":
-            await self._edit(peer_id, cmid, None, None)
-            await toast("Без проблем, в следующий раз 🙂")
-            await settle(planner.today_iso(config_schedule_tz()), "ping", "vk")
+        if data in ("ping:done", "ping:skip"):
+            await toast("Старая кнопка. Открой /ping и отметь сегодняшнюю паузу.")
         elif data == "hard":
             extra = 2
             await db.update_state(week_extra_days=extra)

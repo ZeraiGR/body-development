@@ -49,10 +49,10 @@ async def cmd_help(message: Message) -> None:
         "/remember — обновить память ИИ (сжать историю)\n"
         "/pause — поставить рассылки на паузу\n"
         "/resume — снять паузу\n"
-        "/next — перескочить на следующий день (dev)\n"
+        "/next — что осталось до следующего дня\n"
         "/hard — задержаться на текущей неделе ещё на 2 дня\n"
         "/goto N — открыть прошлый урок без сдвига программы\n"
-        "/lessons — все темы и прочитанное · /continue N — продолжить с дня N\n"
+        "/lessons — все темы и прочитанное · /continue N — вернуться к пройденному дню\n"
         "/mute — отключить рассылки в этом мессенджере · /unmute — вернуть\n"
         "/reset — начать программу заново с дня 1"
     )
@@ -60,9 +60,7 @@ async def cmd_help(message: Message) -> None:
 
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
-    state = await db.get_state()
-    url = await db.get_telegraph_link(state["current_day"])
-    await message.answer(messages.status_text(state, url))
+    await message.answer(await journey.status())
 
 
 @router.message(Command("report"))
@@ -85,10 +83,7 @@ async def cmd_resume(message: Message) -> None:
 
 @router.message(Command("next"))
 async def cmd_next(message: Message) -> None:
-    state = await db.get_state()
-    new_day = min(state["current_day"] + 1, 30)
-    await db.update_state(current_day=new_day, last_morning_date=planner.today_iso(config.schedule.timezone))
-    await message.answer(f"⏭ Перешёл на день {new_day}.")
+    await message.answer(await journey.next_day())
 
 
 @router.message(Command("goto"))
@@ -193,10 +188,7 @@ async def cmd_analyze(message: Message) -> None:
 @router.message(Command("today"))
 async def cmd_today(message: Message) -> None:
     """Показать теорию + утренний запуск текущего дня вручную (не двигает счётчик)."""
-    state = await db.get_state()
-    day = state["current_day"]
-    url = await db.get_telegraph_link(day)
-    text, kb = messages.morning_text(day, url)
+    text, kb = await journey.today()
     await message.answer(text, reply_markup=kb)
 
 
@@ -241,7 +233,7 @@ async def _settle_cb(cb: CallbackQuery, toast: str) -> None:
         pass
 
 
-@router.callback_query(F.data.startswith("learn:") | F.data.startswith("move:") | F.data.startswith("check:"))
+@router.callback_query(F.data.startswith("learn:") | F.data.startswith("move:") | F.data.startswith("check:") | F.data.startswith("pausemove:"))
 async def cb_journey(cb: CallbackQuery) -> None:
     await cb.answer()
     text, kb = await journey.action(cb.data or "")
@@ -257,18 +249,9 @@ async def cb_legacy(cb: CallbackQuery) -> None:
     await cb.answer("Старая кнопка. Открой /today, /theory или /evening.", show_alert=True)
 
 
-@router.callback_query(F.data == "ping:done")
-async def cb_ping_done(cb: CallbackQuery) -> None:
-    today = planner.today_iso(config.schedule.timezone)
-    await _settle_cb(cb, "👍 Красава, тело скажет спасибо")
-    await settle(today, "ping", "tg")
-
-
-@router.callback_query(F.data == "ping:skip")
-async def cb_ping_skip(cb: CallbackQuery) -> None:
-    today = planner.today_iso(config.schedule.timezone)
-    await _settle_cb(cb, "Без проблем, в следующий раз 🙂")
-    await settle(today, "ping", "tg")
+@router.callback_query((F.data == "ping:done") | (F.data == "ping:skip"))
+async def cb_old_ping(cb: CallbackQuery) -> None:
+    await cb.answer("Старая кнопка. Открой /ping и отметь сегодняшнюю паузу.", show_alert=True)
 
 
 @router.callback_query(F.data == "hard")
